@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
@@ -12,7 +14,7 @@ use burn_dragon_hatchling::dataset::{ShakespeareDataset, ShakespeareSplit};
 use burn_dragon_hatchling::{
     BDH, BDHConfig, GenerationConfig, language_model_loss, load_training_config,
 };
-use burn_ndarray::NdArray;
+use burn_wgpu::{self, Wgpu};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Train the Baby Dragon Hatchling model")]
@@ -22,7 +24,7 @@ struct Args {
     config: Vec<PathBuf>,
 }
 
-type ADBackend = Autodiff<NdArray<f32>>;
+type ADBackend = Autodiff<Wgpu<f32>>;
 
 fn main() {
     if let Err(err) = run() {
@@ -40,6 +42,7 @@ fn run() -> Result<()> {
 
     <ADBackend as BackendTrait>::seed(1337);
     let device = <ADBackend as BackendTrait>::Device::default();
+    burn_wgpu::init_setup::<burn_wgpu::graphics::AutoGraphicsApi>(&device, Default::default());
 
     let training = &config.training;
     let optimizer_cfg = &config.optimizer;
@@ -67,6 +70,20 @@ fn run() -> Result<()> {
     }
     if let Some(dropout) = config.model.dropout {
         model_config.dropout = dropout;
+    }
+    if let Some(enabled) = config.model.fused_kernels {
+        model_config.fused_kernels.enabled = enabled;
+    }
+    if let Some(block) = config.model.block_size {
+        model_config.fused_kernels.set_block_sizes(block, block);
+    }
+    if let Some(use_alibi) = config.model.use_alibi {
+        model_config.fused_kernels.set_use_alibi(use_alibi);
+        if !use_alibi {
+            model_config
+                .fused_kernels
+                .set_alibi_slopes(vec![0.0; model_config.n_head]);
+        }
     }
 
     let mut model = BDH::<ADBackend>::new(model_config, &device);

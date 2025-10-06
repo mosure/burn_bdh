@@ -125,7 +125,7 @@ impl ShakespeareDataset {
 fn download_shakespeare(path: &Path) -> io::Result<()> {
     let response = ureq::get(SHAKESPEARE_URL)
         .call()
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+        .map_err(|err| io::Error::other(err.to_string()))?;
 
     let mut reader = response.into_reader();
     let mut contents = Vec::new();

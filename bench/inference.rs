@@ -1,13 +1,16 @@
+#![recursion_limit = "512"]
+
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_dragon_hatchling::{BDH, BDHConfig};
-use burn_ndarray::NdArray;
+use burn_wgpu::{self, Wgpu};
 use criterion::{Criterion, criterion_group, criterion_main};
 
 fn inference_bench(c: &mut Criterion) {
-    type Backend = NdArray<f32>;
+    type Backend = Wgpu<f32>;
     <Backend as BackendTrait>::seed(42);
     let device = <Backend as BackendTrait>::Device::default();
+    burn_wgpu::init_setup::<burn_wgpu::graphics::AutoGraphicsApi>(&device, Default::default());
 
     let model = BDH::<Backend>::new(BDHConfig::default(), &device);
 

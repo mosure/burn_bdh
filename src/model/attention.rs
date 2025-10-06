@@ -4,23 +4,58 @@ use burn::module::Module;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor};
 
-const DEFAULT_THETA: f32 = 65_536.0;
+use super::config::FusedKernelConfig;
+use crate::kernel::{BlockPattern2d, linear_attention};
 
 #[derive(Module, Debug)]
 pub struct Attention<B: Backend> {
     freqs: Tensor<B, 4>,
     n_head: usize,
+    fused: bool,
+    block_pattern: BlockPattern2d,
+    use_alibi: bool,
+    alibi_slopes: Tensor<B, 1>,
 }
 
 impl<B: Backend> Attention<B> {
-    pub fn new(latent: usize, n_head: usize, device: &B::Device) -> Self {
+    pub fn new(
+        latent: usize,
+        n_head: usize,
+        device: &B::Device,
+        kernel: &FusedKernelConfig,
+    ) -> Self {
+        let freqs = Self::build_freqs(latent, kernel.rope_theta, device);
+        let (use_alibi, alibi_slopes) = if kernel.enabled && kernel.use_alibi {
+            let slopes = kernel
+                .alibi_slopes
+                .clone()
+                .unwrap_or_else(|| linear_attention::default_alibi_slopes(n_head));
+            (true, Tensor::<B, 1>::from_floats(slopes.as_slice(), device))
+        } else {
+            (false, Tensor::<B, 1>::zeros([n_head], device))
+        };
+
         Self {
-            freqs: Self::build_freqs(latent, device),
+            freqs,
             n_head,
+            fused: kernel.enabled,
+            block_pattern: kernel.block_sparse.time.clone(),
+            use_alibi,
+            alibi_slopes,
         }
     }
 
     pub fn forward(&self, query: Tensor<B, 4>, value: Tensor<B, 4>) -> Tensor<B, 4> {
+        if self.fused {
+            return linear_attention::fused_state_aligned(
+                query,
+                value,
+                self.freqs.clone(),
+                self.use_alibi.then(|| self.alibi_slopes.clone()),
+                &self.block_pattern,
+            );
+        }
+
         let [_batch, _heads, time, _dim] = query.shape().dims();
         let device = self.freqs.device();
         let positions = Tensor::<B, 1, Int>::arange(0..time as i64, &device)
@@ -53,12 +88,12 @@ impl<B: Backend> Attention<B> {
         values * cos + rotated * sin
     }
 
-    fn build_freqs(latent: usize, device: &B::Device) -> Tensor<B, 4> {
+    fn build_freqs(latent: usize, theta: f32, device: &B::Device) -> Tensor<B, 4> {
         let mut data = Vec::with_capacity(latent);
         for idx in 0..latent {
             let quantized = (idx as f32 / 2.0).floor() * 2.0;
             let exponent = quantized / latent as f32;
-            let value = 1.0 / DEFAULT_THETA.powf(exponent) / (2.0 * PI);
+            let value = 1.0 / theta.powf(exponent) / (2.0 * PI);
             data.push(value);
         }
         Tensor::<B, 1>::from_floats(data.as_slice(), device).reshape([1, 1, 1, latent])

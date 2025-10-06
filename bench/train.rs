@@ -1,16 +1,19 @@
+#![recursion_limit = "512"]
+
 use burn::LearningRate;
 use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
 use burn_dragon_hatchling::{BDH, BDHConfig, language_model_loss};
-use burn_ndarray::NdArray;
+use burn_wgpu::{self, Wgpu};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 
 fn training_step_bench(c: &mut Criterion) {
-    type Backend = Autodiff<NdArray<f32>>;
+    type Backend = Autodiff<Wgpu<f32>>;
     <Backend as BackendTrait>::seed(24);
     let device = <Backend as BackendTrait>::Device::default();
+    burn_wgpu::init_setup::<burn_wgpu::graphics::AutoGraphicsApi>(&device, Default::default());
 
     let base_model = BDH::<Backend>::new(BDHConfig::default(), &device);
     let batch_size = 4;

@@ -43,6 +43,9 @@ pub struct ModelOverrides {
     pub n_head: Option<usize>,
     pub mlp_internal_dim_multiplier: Option<usize>,
     pub dropout: Option<f64>,
+    pub fused_kernels: Option<bool>,
+    pub use_alibi: Option<bool>,
+    pub block_size: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -157,6 +160,8 @@ mod tests {
             "n_head = 4",
             "mlp_internal_dim_multiplier = 128",
             "dropout = 0.1",
+            "fused_kernels = false",
+            "use_alibi = false",
         ]
         .join("\n");
         let base = write_config(dir.path(), "base.toml", &base_contents);
@@ -170,6 +175,8 @@ mod tests {
             "",
             "[model]",
             "n_embd = 320",
+            "fused_kernels = true",
+            "block_size = 256",
         ]
         .join("\n");
         let override_cfg = write_config(dir.path(), "override.toml", &override_contents);
@@ -194,5 +201,8 @@ mod tests {
         assert_eq!(config.model.n_head, Some(4));
         assert_eq!(config.model.mlp_internal_dim_multiplier, Some(128));
         assert_eq!(config.model.dropout, Some(0.1));
+        assert_eq!(config.model.fused_kernels, Some(true));
+        assert_eq!(config.model.block_size, Some(256));
+        assert_eq!(config.model.use_alibi, Some(false));
     }
 }

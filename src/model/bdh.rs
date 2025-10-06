@@ -6,8 +6,10 @@ use rand::distributions::{Distribution, WeightedIndex};
 use rand::prelude::*;
 use std::cmp::Ordering;
 
+use crate::kernel::{BlockPattern1d, relu_lowrank};
+
 use super::attention::Attention;
-use super::config::BDHConfig;
+use super::config::{BDHConfig, FusedKernelConfig};
 
 const LAYER_NORM_EPS: f32 = 1e-5;
 
@@ -18,6 +20,7 @@ pub struct BDH<B: Backend> {
     n_head: usize,
     mlp_internal_dim_multiplier: usize,
     vocab_size: usize,
+    kernel: FusedKernelConfig,
     embed: Embedding<B>,
     dropout: Dropout,
     attention: Attention<B>,
@@ -34,7 +37,12 @@ impl<B: Backend> BDH<B> {
 
         let latent_per_head = config.latent_per_head();
         let latent_total = config.latent_total();
-        let attention = Attention::new(latent_per_head, config.n_head, device);
+        let attention = Attention::new(
+            latent_per_head,
+            config.n_head,
+            device,
+            &config.fused_kernels,
+        );
 
         let weight_init = |shape: [usize; 2]| {
             Tensor::<B, 2>::random(shape, TensorDistribution::Normal(0.0, 0.02), device)
@@ -61,6 +69,7 @@ impl<B: Backend> BDH<B> {
             n_head: config.n_head,
             mlp_internal_dim_multiplier: config.mlp_internal_dim_multiplier,
             vocab_size: config.vocab_size,
+            kernel: config.fused_kernels,
             embed,
             dropout,
             attention,
@@ -83,16 +92,44 @@ impl<B: Backend> BDH<B> {
         let encoder = self.encoder.val().unsqueeze_dim::<4>(0);
         let encoder_v = self.encoder_v.val().unsqueeze_dim::<4>(0);
         let decoder = self.decoder.val();
+        let fused = self.kernel.enabled;
+        let latent_pattern: &BlockPattern1d = &self.kernel.block_sparse.latent;
 
         for _ in 0..self.n_layer {
-            let x_latent = state.clone().matmul(encoder.clone());
-            let x_sparse = activation::relu(x_latent);
+            let x_sparse = if fused {
+                relu_lowrank::fused_forward(
+                    state.clone(),
+                    encoder.clone(),
+                    None,
+                    self.kernel.relu_threshold,
+                    latent_pattern,
+                )
+            } else {
+                let mut x_latent = state.clone().matmul(encoder.clone());
+                if self.kernel.relu_threshold != 0.0 {
+                    x_latent = x_latent.sub_scalar(self.kernel.relu_threshold);
+                }
+                activation::relu(x_latent)
+            };
 
             let attn = self.attention.forward(x_sparse.clone(), state.clone());
             let attn = self.layer_norm(attn);
 
-            let y_latent = attn.matmul(encoder_v.clone());
-            let y_sparse = activation::relu(y_latent);
+            let y_sparse = if fused {
+                relu_lowrank::fused_forward(
+                    attn.clone(),
+                    encoder_v.clone(),
+                    None,
+                    self.kernel.relu_threshold,
+                    latent_pattern,
+                )
+            } else {
+                let mut y_latent = attn.matmul(encoder_v.clone());
+                if self.kernel.relu_threshold != 0.0 {
+                    y_latent = y_latent.sub_scalar(self.kernel.relu_threshold);
+                }
+                activation::relu(y_latent)
+            };
             let xy_sparse = x_sparse * y_sparse;
             let xy_sparse = self.dropout.forward(xy_sparse);
 
@@ -109,12 +146,10 @@ impl<B: Backend> BDH<B> {
         }
 
         let [batch, _, time, dim] = state.shape().dims();
-        let flat = state.reshape([batch * time, dim]);
-        let logits = flat
+        state
+            .reshape([batch * time, dim])
             .matmul(self.lm_head.val())
-            .reshape([batch, time, self.vocab_size]);
-
-        logits
+            .reshape([batch, time, self.vocab_size])
     }
 
     pub fn generate(
@@ -141,15 +176,16 @@ impl<B: Backend> BDH<B> {
                 .into_vec::<f32>()
                 .expect("logits to vec");
 
-            if let Some(k) = top_k {
-                if k > 0 && k < vocab {
-                    let mut sorted = logits_values.clone();
-                    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Equal));
-                    let threshold = sorted[k - 1];
-                    for value in logits_values.iter_mut() {
-                        if *value < threshold {
-                            *value = f32::NEG_INFINITY;
-                        }
+            if let Some(k) = top_k
+                && k > 0
+                && k < vocab
+            {
+                let mut sorted = logits_values.clone();
+                sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Equal));
+                let threshold = sorted[k - 1];
+                for value in logits_values.iter_mut() {
+                    if *value < threshold {
+                        *value = f32::NEG_INFINITY;
                     }
                 }
             }
