@@ -23,6 +23,7 @@ burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2
 - [ ] neuromorphic backend
 - [ ] streaming, sparse synaptic backpropagation
 - [ ] temporal neuron dampening
+- [ ] adaptive tool discovery
 - [ ] training benchmarks and reporting
 
 

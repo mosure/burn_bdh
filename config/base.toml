@@ -1,0 +1,26 @@
+[dataset]
+cache_dir = "data"
+train_split_ratio = 0.9
+
+[training]
+block_size = 512
+batch_size = 32
+max_iters = 3000
+log_frequency = 100
+
+[optimizer]
+learning_rate = 0.001
+weight_decay = 0.1
+
+[generation]
+prompt = "To be or "
+max_tokens = 100
+temperature = 1.0
+top_k = 3
+
+[model]
+n_layer = 6
+n_embd = 256
+n_head = 4
+mlp_internal_dim_multiplier = 128
+dropout = 0.1

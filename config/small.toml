@@ -1,0 +1,6 @@
+[model]
+n_layer = 4
+n_embd = 192
+n_head = 4
+mlp_internal_dim_multiplier = 96
+dropout = 0.1
