@@ -1,8 +1,8 @@
 # burn_dragon_hatchling 🔥🐉🐣
 
-[![test](https://github.com/mosure/burn_dino/workflows/test/badge.svg)](https://github.com/Mosure/burn_dino/actions?query=workflow%3Atest)
-[![GitHub License](https://img.shields.io/github/license/mosure/burn_dino)](https://raw.githubusercontent.com/mosure/burn_dino/main/LICENSE)
-[![crates.io](https://img.shields.io/crates/v/burn_dino.svg)](https://crates.io/crates/burn_dino)
+[![test](https://github.com/mosure/burn_dragon_hatchling/workflows/test/badge.svg)](https://github.com/Mosure/burn_dragon_hatchling/actions?query=workflow%3Atest)
+[![GitHub License](https://img.shields.io/github/license/mosure/burn_dragon_hatchling)](https://raw.githubusercontent.com/mosure/burn_dragon_hatchling/main/LICENSE)
+[![crates.io](https://img.shields.io/crates/v/burn_dragon_hatchling.svg)](https://crates.io/crates/burn_dragon_hatchling)
 
 
 burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2509.26507) model
