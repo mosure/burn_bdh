@@ -1,0 +1,140 @@
+[package]
+name = "burn_hatchling"
+description = "burn (baby) dragon hatchling inference and training"
+version = "0.1.0"
+edition = "2024"
+authors = ["mosure <mitchell@mosure.me>"]
+license = "MIT OR Apache-2.0"
+keywords = [
+  "burn",
+  "bdh",
+  "language-model",
+  "machine-learning",
+]
+categories = [
+  "compression",
+  "science",
+  "science::neuroscience",
+]
+homepage = "https://github.com/mosure/burn_bdh"
+repository = "https://github.com/mosure/burn_bdh"
+readme = "README.md"
+exclude = [
+  ".devcontainer",
+  ".github",
+  "docs",
+  "dist",
+  "build",
+  "assets",
+  "credits",
+]
+
+
+[features]
+default = []
+
+benchmark = ["burn/autotune", "burn/fusion"]
+
+
+[dependencies]
+toml = "0.9"
+
+
+[dependencies.burn]
+version = "0.18"
+default-features = true
+features = [
+  # "autotune",
+  "fusion",
+  "ndarray",
+  "std",
+  # "vulkan",
+  # "webgpu",
+  "wgpu",
+]
+
+[dependencies.burn-wgpu]
+version = "0.18"
+default-features = true
+features = [
+  "fusion",
+  "std",
+  # "template",
+]
+
+[dependencies.cubecl]
+version = "0.6"
+default-features = true
+features = [
+  # "autotune-checks",
+#   "linalg",
+  "std",
+  # "template",
+  # "wgpu",
+  # "wgpu-spirv",
+]
+
+[dependencies.cubecl-runtime]
+version = "0.6"
+default-features = true
+features = [
+  # "autotune-checks",
+  # "channel-cell",
+  "channel-mpsc",
+  # "channel-mutex",
+  "std",
+  # "storage-bytes",
+]
+
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+wasm-bindgen = "0.2"
+
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+  'Document',
+  'Element',
+  'HtmlElement',
+  'Location',
+  'Node',
+  'Window',
+]
+
+
+[dev-dependencies]
+criterion = { version = "0.7", features = ["html_reports"] }
+futures-intrusive = { version = "0.5.0" }
+pollster = { version = "0.4.0" }
+
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+panic = "abort"
+
+[profile.wasm-release]
+strip = "symbols"
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "train"
+path = "src/train.rs"
