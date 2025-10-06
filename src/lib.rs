@@ -4,6 +4,7 @@ pub mod config;
 pub mod dataset;
 pub mod kernel;
 pub mod model;
+pub mod wgpu;
 
 pub use config::{
     DatasetConfig, GenerationConfig, ModelOverrides, OptimizerConfig, TrainingConfig,

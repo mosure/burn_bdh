@@ -76,9 +76,7 @@ impl<B: Backend> Module<B> for FusedKernelConfig {
         self
     }
 
-    fn into_record(self) -> Self::Record {
-        ()
-    }
+    fn into_record(self) -> Self::Record {}
 }
 
 impl<B: AutodiffBackend> AutodiffModule<B> for FusedKernelConfig {

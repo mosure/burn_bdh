@@ -48,15 +48,13 @@ impl BlockPattern1d {
         let mut data = vec![0.0; elements];
 
         let block_size = self.block_size.max(1);
-        let total_blocks = (elements + block_size - 1) / block_size;
+        let total_blocks = elements.div_ceil(block_size);
 
         for block_idx in 0..total_blocks {
             if self.is_block_active(block_idx) {
                 let start = block_idx * block_size;
                 let end = usize::min(start + block_size, elements);
-                for idx in start..end {
-                    data[idx] = 1.0;
-                }
+                data[start..end].fill(1.0);
             }
         }
 
@@ -158,9 +156,7 @@ impl<B: Backend> Module<B> for BlockPattern1d {
         self
     }
 
-    fn into_record(self) -> Self::Record {
-        ()
-    }
+    fn into_record(self) -> Self::Record {}
 }
 
 impl<B: Backend> Module<B> for BlockPattern2d {
@@ -188,9 +184,7 @@ impl<B: Backend> Module<B> for BlockPattern2d {
         self
     }
 
-    fn into_record(self) -> Self::Record {
-        ()
-    }
+    fn into_record(self) -> Self::Record {}
 }
 
 impl<B: Backend> Module<B> for BlockSparseConfig {
@@ -218,9 +212,7 @@ impl<B: Backend> Module<B> for BlockSparseConfig {
         self
     }
 
-    fn into_record(self) -> Self::Record {
-        ()
-    }
+    fn into_record(self) -> Self::Record {}
 }
 
 impl<B: AutodiffBackend> AutodiffModule<B> for BlockPattern1d {

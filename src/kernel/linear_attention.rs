@@ -28,7 +28,7 @@ pub fn fused_state_aligned<B: Backend>(
     let mut outputs: Vec<Tensor<B, 4>> = Vec::new();
 
     let block_size = usize::max(layout.block_size(), 1);
-    let total_blocks = (time + block_size - 1) / block_size;
+    let total_blocks = time.div_ceil(block_size);
     let (slopes, use_alibi) = match alibi_slopes {
         Some(tensor) => (tensor.reshape([1, heads, 1, 1]), true),
         None => (
@@ -93,8 +93,7 @@ pub fn fused_state_aligned<B: Backend>(
         outputs.push(block_acc);
     }
 
-    let attn = Tensor::cat(outputs, 2);
-    attn
+    Tensor::cat(outputs, 2)
 }
 
 fn apply_rope<B: Backend>(

@@ -12,9 +12,9 @@ use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
 use burn_dragon_hatchling::dataset::{ShakespeareDataset, ShakespeareSplit};
 use burn_dragon_hatchling::{
-    BDH, BDHConfig, GenerationConfig, language_model_loss, load_training_config,
+    BDH, BDHConfig, GenerationConfig, language_model_loss, load_training_config, wgpu::init_runtime,
 };
-use burn_wgpu::{self, Wgpu};
+use burn_wgpu::Wgpu;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Train the Baby Dragon Hatchling model")]
@@ -42,7 +42,7 @@ fn run() -> Result<()> {
 
     <ADBackend as BackendTrait>::seed(1337);
     let device = <ADBackend as BackendTrait>::Device::default();
-    burn_wgpu::init_setup::<burn_wgpu::graphics::AutoGraphicsApi>(&device, Default::default());
+    init_runtime(&device);
 
     let training = &config.training;
     let optimizer_cfg = &config.optimizer;
