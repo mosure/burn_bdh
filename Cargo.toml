@@ -1,5 +1,5 @@
 [package]
-name = "burn_hatchling"
+name = "burn_dragon_hatchling"
 description = "burn (baby) dragon hatchling inference and training"
 version = "0.1.0"
 edition = "2024"

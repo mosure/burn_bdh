@@ -1,4 +1,4 @@
-# burn_hatchling 🔥🐉🐣
+# burn_dragon_hatchling 🔥🐉🐣
 
 [![test](https://github.com/mosure/burn_dino/workflows/test/badge.svg)](https://github.com/Mosure/burn_dino/actions?query=workflow%3Atest)
 [![GitHub License](https://img.shields.io/github/license/mosure/burn_dino)](https://raw.githubusercontent.com/mosure/burn_dino/main/LICENSE)
