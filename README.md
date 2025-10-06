@@ -39,9 +39,9 @@ burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2
 
 ## compatible burn versions
 
-| `burn_bdh` | `burn` |
-| :--        | :--    |
-| `0.1`      | `0.18` |
+| `burn_dragon_hatchling` | `burn` |
+| :--                     | :--    |
+| `0.1`                   | `0.18` |
 
 
 ## license
