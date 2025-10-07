@@ -22,7 +22,7 @@ burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2
 - [ ] fused kernels
 - [ ] hierarchical, memory-aware recurrent state
 - [ ] mixture-of-expert routing
-- [ ] multi modal architecture
+- [ ] multi-modal architecture
 - [ ] neuromorphic backend
 - [ ] rl reasoning training
 - [ ] streaming, sparse synaptic backpropagation
@@ -31,10 +31,7 @@ burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2
 
 ## training
 
-- `cargo run --release -- --config ./config/dev.toml` (defaults to the wgpu backend)
-- append `--backend cuda` to target the CUDA backend; logs now include a `samples_per_s`
-  estimate based on the configured batch size.
-- Training uses the `burn-train` TUI renderer and stores checkpoints/metrics under `./runs/`.
+- `cargo run --release -- --config ./config/dev.toml` (defaults to the cuda backend)
 
 
 ## benchmarks
