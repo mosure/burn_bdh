@@ -140,12 +140,12 @@ impl BDHConfig {
     pub fn latent_per_head(&self) -> usize {
         let total = self.mlp_internal_dim_multiplier * self.n_embd;
         assert!(
-            total % self.n_head == 0,
+            total.is_multiple_of(self.n_head),
             "latent size must be divisible by the number of heads"
         );
         let latent_per_head = total / self.n_head;
         assert!(
-            latent_per_head % self.n_expert == 0,
+            latent_per_head.is_multiple_of(self.n_expert),
             "latent per head {} must be divisible by experts {}",
             latent_per_head,
             self.n_expert
