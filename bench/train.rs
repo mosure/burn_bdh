@@ -37,6 +37,11 @@ const TRAIN_CONFIGS: &[TrainConfig] = &[
         batch: 16,
         block: 256,
     },
+    TrainConfig {
+        name: "b16_t512",
+        batch: 8,
+        block: 512,
+    },
 ];
 
 fn training_step_bench(c: &mut Criterion) {

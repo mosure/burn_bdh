@@ -43,8 +43,8 @@ struct Args {
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum BackendArg {
-    Wgpu,
     Cuda,
+    Wgpu,
 }
 
 #[derive(Clone)]

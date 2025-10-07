@@ -15,6 +15,7 @@ burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2
 ## features
 
 - [x] training benchmarks and reporting
+- [ ] adaptive tool discovery
 - [ ] conditional (deep) gating
 - [ ] document-coherent dataloading and scale mixup
 - [ ] episodic memory
@@ -24,7 +25,6 @@ burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2
 - [ ] neuromorphic backend
 - [ ] streaming, sparse synaptic backpropagation
 - [ ] temporal neuron dampening
-- [ ] adaptive tool discovery
 
 
 ## training

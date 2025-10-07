@@ -4,7 +4,7 @@ train_split_ratio = 0.9
 
 [training]
 block_size = 512
-batch_size = 32
+batch_size = 16
 max_iters = 3000
 log_frequency = 100
 
