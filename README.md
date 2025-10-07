@@ -14,6 +14,7 @@ burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2
 
 ## features
 
+- [x] mixture-of-expert routing
 - [x] training benchmarks and reporting
 - [ ] adaptive tool discovery
 - [ ] conditional (deep) gating
@@ -21,7 +22,6 @@ burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2
 - [ ] episodic memory
 - [ ] fused kernels
 - [ ] hierarchical, memory-aware recurrent state
-- [ ] mixture-of-expert routing
 - [ ] multi-modal architecture
 - [ ] neuromorphic backend
 - [ ] rl reasoning training

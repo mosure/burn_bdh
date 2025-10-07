@@ -10,6 +10,7 @@ use crate::kernel::{BlockPattern1d, relu_lowrank};
 
 use super::attention::Attention;
 use super::config::{BDHConfig, FusedKernelConfig};
+use super::router::Router;
 
 const LAYER_NORM_EPS: f32 = 1e-5;
 
@@ -19,11 +20,13 @@ pub struct BDH<B: Backend> {
     n_embd: usize,
     n_head: usize,
     mlp_internal_dim_multiplier: usize,
+    n_expert: usize,
     vocab_size: usize,
     kernel: FusedKernelConfig,
     embed: Embedding<B>,
     dropout: Dropout,
     attention: Attention<B>,
+    router: Router<B>,
     encoder: Param<Tensor<B, 3>>,
     encoder_v: Param<Tensor<B, 3>>,
     decoder: Param<Tensor<B, 2>>,
@@ -42,6 +45,13 @@ impl<B: Backend> BDH<B> {
             config.n_head,
             device,
             &config.fused_kernels,
+        );
+        let router = Router::new(
+            config.n_expert,
+            config.n_head,
+            config.n_embd,
+            latent_per_head,
+            device,
         );
 
         let weight_init = |shape: [usize; 2]| {
@@ -68,11 +78,13 @@ impl<B: Backend> BDH<B> {
             n_embd: config.n_embd,
             n_head: config.n_head,
             mlp_internal_dim_multiplier: config.mlp_internal_dim_multiplier,
+            n_expert: config.n_expert,
             vocab_size: config.vocab_size,
             kernel: config.fused_kernels,
             embed,
             dropout,
             attention,
+            router,
             encoder,
             encoder_v,
             decoder,
@@ -131,6 +143,7 @@ impl<B: Backend> BDH<B> {
                 activation::relu(y_latent)
             };
             let xy_sparse = x_sparse * y_sparse;
+            let xy_sparse = self.router.route(state.clone(), xy_sparse);
             let xy_sparse = self.dropout.forward(xy_sparse);
 
             let mixed = xy_sparse.swap_dims(1, 2);

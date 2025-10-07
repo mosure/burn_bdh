@@ -28,6 +28,7 @@ n_layer = 6
 n_embd = 256
 n_head = 4
 mlp_internal_dim_multiplier = 128
+experts = 2
 dropout = 0.1
 fused_kernels = true
 use_alibi = true

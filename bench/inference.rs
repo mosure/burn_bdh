@@ -142,11 +142,11 @@ fn log_theoretical_profile(config: &BDHConfig, cfg: &InferenceConfig) {
 }
 
 fn compute_latent_per_head(config: &BDHConfig) -> usize {
-    (config.mlp_internal_dim_multiplier * config.n_embd) / config.n_head
+    config.latent_per_head()
 }
 
 fn compute_latent_total(config: &BDHConfig) -> usize {
-    compute_latent_per_head(config) * config.n_head
+    config.latent_total()
 }
 
 fn estimated_query_tensor_bytes(config: &BDHConfig, cfg: &InferenceConfig) -> u128 {

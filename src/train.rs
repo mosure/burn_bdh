@@ -468,6 +468,9 @@ fn build_model_config(overrides: &ModelOverrides) -> BDHConfig {
     if let Some(n_head) = overrides.n_head {
         model_config.n_head = n_head;
     }
+    if let Some(experts) = overrides.experts {
+        model_config.n_expert = experts.max(1);
+    }
     if let Some(multiplier) = overrides.mlp_internal_dim_multiplier {
         model_config.mlp_internal_dim_multiplier = multiplier;
     }
