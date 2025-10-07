@@ -1,3 +1,4 @@
+use burn::module::Content;
 use std::collections::HashSet;
 
 use burn::module::{
@@ -224,8 +225,21 @@ impl<B: AutodiffBackend> AutodiffModule<B> for BlockPattern1d {
 }
 
 impl ModuleDisplayDefault for BlockPattern1d {
-    fn content(&self, _content: burn::module::Content) -> Option<burn::module::Content> {
-        None
+    fn content(&self, content: Content) -> Option<Content> {
+        let summary = if let Some(blocks) = &self.active_blocks {
+            format!(
+                "block_size={} active_blocks={:?}",
+                self.block_size,
+                blocks.iter().collect::<Vec<_>>()
+            )
+        } else {
+            format!("block_size={} dense", self.block_size)
+        };
+
+        content
+            .set_top_level_type("BlockPattern1d")
+            .add_formatted(&summary)
+            .optional()
     }
 }
 
@@ -240,8 +254,21 @@ impl<B: AutodiffBackend> AutodiffModule<B> for BlockPattern2d {
 }
 
 impl ModuleDisplayDefault for BlockPattern2d {
-    fn content(&self, _content: burn::module::Content) -> Option<burn::module::Content> {
-        None
+    fn content(&self, content: Content) -> Option<Content> {
+        let summary = if let Some(pairs) = &self.active_pairs {
+            format!(
+                "block_size={} active_pairs={:?}",
+                self.block_size,
+                pairs.iter().collect::<Vec<_>>()
+            )
+        } else {
+            format!("block_size={} dense_lower_triangular", self.block_size)
+        };
+
+        content
+            .set_top_level_type("BlockPattern2d")
+            .add_formatted(&summary)
+            .optional()
     }
 }
 
@@ -256,8 +283,12 @@ impl<B: AutodiffBackend> AutodiffModule<B> for BlockSparseConfig {
 }
 
 impl ModuleDisplayDefault for BlockSparseConfig {
-    fn content(&self, _content: burn::module::Content) -> Option<burn::module::Content> {
-        None
+    fn content(&self, content: Content) -> Option<Content> {
+        content
+            .set_top_level_type("BlockSparseConfig")
+            .add("latent", &self.latent)
+            .add("time", &self.time)
+            .optional()
     }
 }
 

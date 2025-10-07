@@ -14,6 +14,7 @@ burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2
 
 ## features
 
+- [x] training benchmarks and reporting
 - [ ] conditional (deep) gating
 - [ ] document-coherent dataloading and scale mixup
 - [ ] episodic memory
@@ -24,13 +25,14 @@ burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2
 - [ ] streaming, sparse synaptic backpropagation
 - [ ] temporal neuron dampening
 - [ ] adaptive tool discovery
-- [ ] training benchmarks and reporting
 
 
 ## training
 
 - `cargo run --release -- --config ./config/dev.toml` (defaults to the wgpu backend)
-- append `--backend cuda` to target the CUDA backend
+- append `--backend cuda` to target the CUDA backend; logs now include a `samples_per_s`
+  estimate based on the configured batch size.
+- Training uses the `burn-train` TUI renderer and stores checkpoints/metrics under `./runs/`.
 
 
 ## benchmarks

@@ -1,25 +1,34 @@
 #![recursion_limit = "512"]
 
+use std::fs;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, ValueEnum};
 
 use burn::LearningRate;
-use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
+use burn::data::dataloader::DataLoader;
+use burn::optim::AdamWConfig;
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
-use burn_dragon_hatchling::dataset::{ShakespeareDataset, ShakespeareSplit};
-use burn_dragon_hatchling::{
-    BDH, BDHConfig, GenerationConfig, ModelOverrides, TrainingConfig, language_model_loss,
-    load_training_config, wgpu::init_runtime,
-};
+use burn_train::metric::{Adaptor, ItemLazy, LearningRateMetric, LossInput, LossMetric};
+use burn_train::{LearnerBuilder, TrainOutput, TrainStep, ValidStep};
 use burn_wgpu::Wgpu;
+use tracing::info;
 
 #[cfg(feature = "cuda")]
 use burn_cuda::Cuda;
+
+use burn::record::{BinFileRecorder, FullPrecisionSettings};
+
+use burn_dragon_hatchling::wgpu::init_runtime;
+use burn_dragon_hatchling::{
+    BDH, BDHConfig, DatasetConfig, GenerationConfig, ModelOverrides, ShakespeareBatch,
+    ShakespeareDataset, ShakespeareRandomDataLoader, ShakespeareSplit, TrainingConfig,
+    TrainingHyperparameters, language_model_loss, load_training_config,
+};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Train the Baby Dragon Hatchling model")]
@@ -28,7 +37,7 @@ struct Args {
     #[arg(short = 'c', long = "config", value_name = "PATH")]
     config: Vec<PathBuf>,
     /// Backend to use for training.
-    #[arg(long, value_enum, default_value_t = BackendArg::Wgpu)]
+    #[arg(long, value_enum, default_value_t = BackendArg::Cuda)]
     backend: BackendArg,
 }
 
@@ -36,6 +45,67 @@ struct Args {
 enum BackendArg {
     Wgpu,
     Cuda,
+}
+
+#[derive(Clone)]
+struct LanguageModelOutput<B: BackendTrait> {
+    loss: Tensor<B, 1>,
+}
+
+impl<B: BackendTrait> LanguageModelOutput<B> {
+    fn new(loss: Tensor<B, 1>) -> Self {
+        Self { loss }
+    }
+}
+
+impl<B: BackendTrait> ItemLazy for LanguageModelOutput<B> {
+    type ItemSync = Self;
+
+    fn sync(self) -> Self::ItemSync {
+        self
+    }
+}
+
+impl<B: BackendTrait> Adaptor<LossInput<B>> for LanguageModelOutput<B> {
+    fn adapt(&self) -> LossInput<B> {
+        LossInput::new(self.loss.clone())
+    }
+}
+
+struct LanguageModelTrainItem<B: AutodiffBackend> {
+    loss: Tensor<B, 1>,
+}
+
+impl<B: AutodiffBackend> LanguageModelTrainItem<B> {
+    fn new(loss: Tensor<B, 1>) -> Self {
+        Self { loss }
+    }
+}
+
+impl<B: AutodiffBackend> ItemLazy for LanguageModelTrainItem<B> {
+    type ItemSync = LanguageModelOutput<B::InnerBackend>;
+
+    fn sync(self) -> Self::ItemSync {
+        LanguageModelOutput::new(self.loss.inner())
+    }
+}
+
+impl<B: AutodiffBackend> TrainStep<ShakespeareBatch<B>, LanguageModelTrainItem<B>> for BDH<B> {
+    fn step(&self, batch: ShakespeareBatch<B>) -> TrainOutput<LanguageModelTrainItem<B>> {
+        let logits = self.forward(batch.inputs);
+        let loss = language_model_loss::<B>(logits, batch.targets);
+        let grads = loss.backward();
+
+        TrainOutput::new(self, grads, LanguageModelTrainItem::new(loss))
+    }
+}
+
+impl<B: BackendTrait> ValidStep<ShakespeareBatch<B>, LanguageModelOutput<B>> for BDH<B> {
+    fn step(&self, batch: ShakespeareBatch<B>) -> LanguageModelOutput<B> {
+        let logits = self.forward(batch.inputs);
+        let loss = language_model_loss::<B>(logits, batch.targets);
+        LanguageModelOutput::new(loss)
+    }
 }
 
 fn main() {
@@ -52,25 +122,19 @@ fn run() -> Result<()> {
     config_paths.extend(args.config);
     let config = load_training_config(&config_paths)?;
 
-    let training = &config.training;
-    let dataset = ShakespeareDataset::new(
-        &config.dataset.cache_dir,
-        training.block_size,
-        training.batch_size,
-        config.dataset.train_split_ratio,
-    )
-    .with_context(|| "failed to prepare Shakespeare dataset")?;
+    let dataset = Arc::new(prepare_dataset(&config.dataset, &config.training)?);
 
     match args.backend {
-        BackendArg::Wgpu => {
-            train_backend::<Autodiff<Wgpu<f32>>, _>(&config, &dataset, "wgpu", |device| {
-                init_runtime(device)
-            })
-        }
+        BackendArg::Wgpu => train_backend::<Autodiff<Wgpu<f32>>, _>(
+            &config,
+            Arc::clone(&dataset),
+            "wgpu",
+            |device| init_runtime(device),
+        ),
         BackendArg::Cuda => {
             #[cfg(feature = "cuda")]
             {
-                train_backend::<Autodiff<Cuda<f32>>, _>(&config, &dataset, "cuda", |_| {})
+                train_backend::<Autodiff<Cuda<f32>>, _>(&config, dataset, "cuda", |_| {})
             }
             #[cfg(not(feature = "cuda"))]
             {
@@ -84,89 +148,97 @@ fn run() -> Result<()> {
 
 fn train_backend<B, Init>(
     config: &TrainingConfig,
-    dataset: &ShakespeareDataset,
+    dataset: Arc<ShakespeareDataset>,
     backend_name: &str,
     init_backend: Init,
 ) -> Result<()>
 where
     B: AutodiffBackend + Clone + 'static,
-    Init: Fn(&<B as BackendTrait>::Device),
+    B::Device: Clone,
+    Init: Fn(&B::Device),
 {
-    <B as BackendTrait>::seed(1337);
-    let device = <B as BackendTrait>::Device::default();
+    B::seed(1337);
+    let device = B::Device::default();
     init_backend(&device);
 
     let training = &config.training;
     let optimizer_cfg = &config.optimizer;
 
     let model_config = build_model_config(&config.model);
-    let mut model = BDH::<B>::new(model_config, &device);
-    let mut optimizer = AdamWConfig::new()
+
+    let train_steps = training.max_iters.max(1);
+    let valid_steps = usize::max(1, training.max_iters / training.log_frequency.max(1));
+
+    let train_loader: Arc<dyn DataLoader<B, ShakespeareBatch<B>>> =
+        Arc::new(ShakespeareRandomDataLoader::<B>::new(
+            Arc::clone(&dataset),
+            ShakespeareSplit::Train,
+            &device,
+            train_steps,
+        ));
+
+    type ValidBackend<B> = <B as AutodiffBackend>::InnerBackend;
+    let valid_device = device.clone();
+    let valid_loader: Arc<dyn DataLoader<ValidBackend<B>, ShakespeareBatch<ValidBackend<B>>>> =
+        Arc::new(ShakespeareRandomDataLoader::<ValidBackend<B>>::new(
+            Arc::clone(&dataset),
+            ShakespeareSplit::Val,
+            &valid_device,
+            valid_steps,
+        ));
+
+    let model = BDH::<B>::new(model_config.clone(), &device);
+    let optim = AdamWConfig::new()
         .with_weight_decay(optimizer_cfg.weight_decay)
         .init::<B, BDH<B>>();
     let lr: LearningRate = optimizer_cfg.learning_rate;
 
-    let mut loss_acc = 0.0f32;
-    let mut loss_steps = 0usize;
-    let mut samples_since_log = 0usize;
-    let mut throughput_timer = Instant::now();
+    let run_dir = PathBuf::from("runs").join(backend_name);
+    fs::create_dir_all(&run_dir)?;
 
-    for step in 0..training.max_iters {
-        let (inputs, targets) = dataset.sample_batch::<B>(ShakespeareSplit::Train, &device);
-        samples_since_log += training.batch_size;
+    let builder = LearnerBuilder::new(&run_dir)
+        .num_epochs(1)
+        .devices(vec![device.clone()])
+        .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
+        .metric_train_numeric(LossMetric::<ValidBackend<B>>::new())
+        .metric_valid_numeric(LossMetric::<ValidBackend<B>>::new())
+        .metric_train_numeric(LearningRateMetric::new())
+        .summary();
 
-        let logits = model.forward(inputs);
-        let loss = language_model_loss::<B>(logits, targets);
-        let loss_value = loss
-            .clone()
-            .to_data()
-            .convert::<f32>()
-            .into_vec::<f32>()
-            .map_err(|err| anyhow!("{err:?}"))?[0];
+    let learner = builder.build(model, optim, lr);
 
-        let grads = loss.backward();
-        let grads = GradientsParams::from_grads(grads, &model);
-        model = optimizer.step(lr, model, grads);
+    log_theoretical_profile(
+        &model_config,
+        training.batch_size,
+        training.block_size,
+        backend_name,
+    );
 
-        loss_acc += loss_value;
-        loss_steps += 1;
+    let model = learner.fit(train_loader, valid_loader);
 
-        if training.log_frequency > 0 && step % training.log_frequency == 0 {
-            let avg_loss = if loss_steps > 0 {
-                loss_acc / loss_steps as f32
-            } else {
-                0.0
-            };
-            let val_loss = compute_validation_loss::<B>(&model, dataset, &device)?;
-            let elapsed = throughput_timer.elapsed();
-            let samples_per_s = if elapsed.as_secs_f64() > 0.0 {
-                samples_since_log as f64 / elapsed.as_secs_f64()
-            } else {
-                f64::NAN
-            };
-            println!(
-                "step {step}/{max_iters} [{backend}] train_loss {avg_loss:.3} val_loss {val_loss:.3} samples_per_s {samples_per_s:.2}",
-                max_iters = training.max_iters,
-                backend = backend_name,
-                samples_per_s = samples_per_s
-            );
-            loss_acc = 0.0;
-            loss_steps = 0;
-            samples_since_log = 0;
-            throughput_timer = Instant::now();
-        }
-    }
-
-    println!("Training complete on {backend_name}. Generating sample...");
+    info!("Training complete on {backend_name}. Generating sample...");
     generate_sample::<B>(
         &model,
-        dataset,
+        dataset.as_ref(),
         &device,
         training.block_size,
         &config.generation,
     )?;
 
     Ok(())
+}
+
+fn prepare_dataset(
+    dataset_cfg: &DatasetConfig,
+    training: &TrainingHyperparameters,
+) -> Result<ShakespeareDataset> {
+    ShakespeareDataset::new(
+        &dataset_cfg.cache_dir,
+        training.block_size,
+        training.batch_size,
+        dataset_cfg.train_split_ratio,
+    )
+    .with_context(|| "failed to prepare Shakespeare dataset")
 }
 
 fn build_model_config(overrides: &ModelOverrides) -> BDHConfig {
@@ -205,38 +277,40 @@ fn build_model_config(overrides: &ModelOverrides) -> BDHConfig {
     model_config
 }
 
-fn compute_validation_loss<B>(
-    model: &BDH<B>,
-    dataset: &ShakespeareDataset,
-    device: &<B as BackendTrait>::Device,
-) -> Result<f32>
-where
-    B: BackendTrait + Clone + 'static,
-{
-    if (dataset.train_split_ratio() - 1.0).abs() < f32::EPSILON {
-        // No validation split available.
-        return Ok(f32::NAN);
-    }
+fn log_theoretical_profile(config: &BDHConfig, batch: usize, block: usize, backend: &str) {
+    let batch = batch as u64;
+    let time = block as u64;
+    let embed = config.n_embd as u64;
+    let latent_per_head =
+        (config.mlp_internal_dim_multiplier * config.n_embd / config.n_head) as u64;
+    let latent_total = latent_per_head * config.n_head as u64;
+    let heads = config.n_head as u64;
+    let bt = batch * time;
 
-    let (val_inputs, val_targets) = dataset.sample_batch::<B>(ShakespeareSplit::Val, device);
-    let val_loss = language_model_loss::<B>(model.forward(val_inputs), val_targets)
-        .to_data()
-        .convert::<f32>()
-        .into_vec::<f32>()
-        .map_err(|err| anyhow!("{err:?}"))?[0];
-    Ok(val_loss)
+    let encoder_matmul = 2 * bt * embed * latent_total;
+    let attn_scores = 2 * batch * heads * time * time * latent_per_head;
+    let attn_value = 2 * batch * heads * time * time * embed;
+    let decoder_matmul = 2 * bt * latent_total * embed;
+    let total = encoder_matmul + attn_scores + attn_value + decoder_matmul;
+
+    info!(
+        "[train:{backend}] approx forward GFLOPs: total={total_gflops:.2}, encoder={enc:.2}, \
+         attn_scores={scores:.2}, attn_value={value:.2}, decoder={dec:.2} (backward ~2x forward)",
+        total_gflops = total as f64 / 1e9,
+        enc = encoder_matmul as f64 / 1e9,
+        scores = attn_scores as f64 / 1e9,
+        value = attn_value as f64 / 1e9,
+        dec = decoder_matmul as f64 / 1e9,
+    );
 }
 
-fn generate_sample<B>(
+fn generate_sample<B: BackendTrait>(
     model: &BDH<B>,
     dataset: &ShakespeareDataset,
-    device: &<B as BackendTrait>::Device,
+    device: &B::Device,
     block_size: usize,
     generation: &GenerationConfig,
-) -> Result<()>
-where
-    B: BackendTrait + Clone + 'static,
-{
+) -> Result<()> {
     let mut prompt_bytes: Vec<i64> = generation
         .prompt
         .as_bytes()

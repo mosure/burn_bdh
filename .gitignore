@@ -15,5 +15,7 @@ www/assets/
 
 assets/images/
 assets/models/
+data/
 output/
+runs/
 sandbox/

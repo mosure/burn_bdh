@@ -10,6 +10,8 @@ pub use config::{
     DatasetConfig, GenerationConfig, ModelOverrides, OptimizerConfig, TrainingConfig,
     TrainingHyperparameters, load_training_config,
 };
-pub use dataset::{ShakespeareDataset, ShakespeareSplit};
+pub use dataset::{
+    ShakespeareBatch, ShakespeareDataset, ShakespeareRandomDataLoader, ShakespeareSplit,
+};
 pub use kernel::{BlockPattern1d, BlockPattern2d, BlockSparseConfig};
 pub use model::{BDH, BDHConfig, language_model_loss};

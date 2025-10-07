@@ -95,6 +95,16 @@ features = [
   # "storage-bytes",
 ]
 
+[dependencies.burn-train]
+version = "0.18"
+default-features = false
+features = [
+  "tui",
+]
+
+[dependencies.tracing]
+version = "0.1"
+
 [dependencies.burn-cuda]
 version = "0.18"
 optional = true

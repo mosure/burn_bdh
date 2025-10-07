@@ -1,7 +1,9 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 
+use burn::data::dataloader::{DataLoader, DataLoaderIterator, Progress};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 use rand::prelude::*;
@@ -15,6 +17,7 @@ pub enum ShakespeareSplit {
     Val,
 }
 
+#[derive(Clone)]
 pub struct ShakespeareDataset {
     data: Vec<u8>,
     train_len: usize,
@@ -119,6 +122,120 @@ impl ShakespeareDataset {
 
     pub fn train_split_ratio(&self) -> f32 {
         self.train_split_ratio
+    }
+
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+}
+
+#[derive(Clone)]
+pub struct ShakespeareBatch<B: Backend> {
+    pub inputs: Tensor<B, 2, Int>,
+    pub targets: Tensor<B, 2, Int>,
+}
+
+impl<B: Backend> ShakespeareBatch<B> {
+    fn new(inputs: Tensor<B, 2, Int>, targets: Tensor<B, 2, Int>) -> Self {
+        Self { inputs, targets }
+    }
+}
+
+#[derive(Clone)]
+pub struct ShakespeareRandomDataLoader<B: Backend> {
+    dataset: Arc<ShakespeareDataset>,
+    split: ShakespeareSplit,
+    device: B::Device,
+    steps_per_epoch: usize,
+}
+
+impl<B: Backend> ShakespeareRandomDataLoader<B> {
+    pub fn new(
+        dataset: Arc<ShakespeareDataset>,
+        split: ShakespeareSplit,
+        device: &B::Device,
+        steps_per_epoch: usize,
+    ) -> Self {
+        Self {
+            dataset,
+            split,
+            device: device.clone(),
+            steps_per_epoch: steps_per_epoch.max(1),
+        }
+    }
+}
+
+impl<B> DataLoader<B, ShakespeareBatch<B>> for ShakespeareRandomDataLoader<B>
+where
+    B: Backend + 'static,
+    B::Device: Clone,
+{
+    fn iter<'a>(&'a self) -> Box<dyn DataLoaderIterator<ShakespeareBatch<B>> + 'a> {
+        Box::new(ShakespeareRandomIterator {
+            dataset: Arc::clone(&self.dataset),
+            split: self.split,
+            device: self.device.clone(),
+            steps_total: self.steps_per_epoch,
+            step: 0,
+        })
+    }
+
+    fn num_items(&self) -> usize {
+        self.steps_per_epoch * self.dataset.batch_size()
+    }
+
+    fn to_device(&self, device: &B::Device) -> Arc<dyn DataLoader<B, ShakespeareBatch<B>>> {
+        Arc::new(Self {
+            dataset: Arc::clone(&self.dataset),
+            split: self.split,
+            device: device.clone(),
+            steps_per_epoch: self.steps_per_epoch,
+        })
+    }
+
+    fn slice(&self, start: usize, end: usize) -> Arc<dyn DataLoader<B, ShakespeareBatch<B>>> {
+        let end = end.min(self.steps_per_epoch);
+        let start = start.min(end);
+        let steps = (end - start).max(1);
+
+        Arc::new(Self {
+            dataset: Arc::clone(&self.dataset),
+            split: self.split,
+            device: self.device.clone(),
+            steps_per_epoch: steps,
+        })
+    }
+}
+
+struct ShakespeareRandomIterator<B: Backend> {
+    dataset: Arc<ShakespeareDataset>,
+    split: ShakespeareSplit,
+    device: B::Device,
+    steps_total: usize,
+    step: usize,
+}
+
+impl<B: Backend> Iterator for ShakespeareRandomIterator<B> {
+    type Item = ShakespeareBatch<B>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.step >= self.steps_total {
+            return None;
+        }
+        self.step += 1;
+
+        let (inputs, targets) = self.dataset.sample_batch::<B>(self.split, &self.device);
+
+        Some(ShakespeareBatch::new(inputs, targets))
+    }
+}
+
+impl<B: Backend> DataLoaderIterator<ShakespeareBatch<B>> for ShakespeareRandomIterator<B> {
+    fn progress(&self) -> Progress {
+        Progress::new(
+            self.step * self.dataset.batch_size(),
+            self.steps_total * self.dataset.batch_size(),
+        )
     }
 }
 

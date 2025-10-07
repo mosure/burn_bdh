@@ -1,5 +1,5 @@
 use burn::module::{
-    AutodiffModule, Devices, Module, ModuleDisplay, ModuleDisplayDefault, ModuleMapper,
+    AutodiffModule, Content, Devices, Module, ModuleDisplay, ModuleDisplayDefault, ModuleMapper,
     ModuleVisitor,
 };
 use burn::tensor::backend::{AutodiffBackend, Backend};
@@ -88,8 +88,22 @@ impl<B: AutodiffBackend> AutodiffModule<B> for FusedKernelConfig {
 }
 
 impl ModuleDisplayDefault for FusedKernelConfig {
-    fn content(&self, _content: burn::module::Content) -> Option<burn::module::Content> {
-        None
+    fn content(&self, content: Content) -> Option<Content> {
+        let summary = format!(
+            "enabled={}, use_alibi={}, relu_threshold={}, rope_theta={}, latent_block={}, time_block={}, custom_alibi={}",
+            self.enabled,
+            self.use_alibi,
+            self.relu_threshold,
+            self.rope_theta,
+            self.block_sparse.latent.block_size(),
+            self.block_sparse.time.block_size(),
+            self.alibi_slopes.as_ref().map(|s| s.len()).unwrap_or(0)
+        );
+
+        content
+            .set_top_level_type("FusedKernelConfig")
+            .add_formatted(&summary)
+            .optional()
     }
 }
 
