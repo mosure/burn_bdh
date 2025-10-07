@@ -168,6 +168,10 @@ path = "src/lib.rs"
 name = "train"
 path = "src/train.rs"
 
+[[bin]]
+name = "infer"
+path = "src/bin/infer.rs"
+
 [[bench]]
 name = "inference"
 harness = false

@@ -24,6 +24,53 @@ pub struct TrainingHyperparameters {
 pub struct OptimizerConfig {
     pub learning_rate: f64,
     pub weight_decay: f32,
+    #[serde(default)]
+    pub lr_schedule: Option<LearningRateScheduleConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LearningRateScheduleConfig {
+    Constant {
+        #[serde(default)]
+        initial_lr: Option<f64>,
+    },
+    Cosine {
+        #[serde(default)]
+        initial_lr: Option<f64>,
+        #[serde(default)]
+        min_lr: Option<f64>,
+        #[serde(default)]
+        num_iters: Option<usize>,
+    },
+    Linear {
+        #[serde(default)]
+        initial_lr: Option<f64>,
+        final_lr: f64,
+        #[serde(default)]
+        num_iters: Option<usize>,
+    },
+    Exponential {
+        #[serde(default)]
+        initial_lr: Option<f64>,
+        gamma: f64,
+    },
+    Step {
+        #[serde(default)]
+        initial_lr: Option<f64>,
+        #[serde(default = "default_step_gamma")]
+        gamma: f64,
+        #[serde(default)]
+        step_size: Option<usize>,
+    },
+    Noam {
+        #[serde(default)]
+        initial_lr: Option<f64>,
+        #[serde(default)]
+        warmup_steps: Option<usize>,
+        #[serde(default)]
+        model_size: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -90,6 +137,16 @@ fn load_value(path: &Path) -> Result<Value> {
 fn merge_values(base: &mut Value, overlay: Value) {
     match (base, overlay) {
         (Value::Table(base_table), Value::Table(overlay_table)) => {
+            if let Some(Value::String(overlay_type)) = overlay_table.get("type") {
+                let type_changed = match base_table.get("type") {
+                    Some(Value::String(base_type)) => base_type != overlay_type,
+                    Some(_) => true,
+                    None => !base_table.is_empty(),
+                };
+                if type_changed {
+                    base_table.clear();
+                }
+            }
             for (key, overlay_value) in overlay_table {
                 match base_table.get_mut(&key) {
                     Some(base_value) => merge_values(base_value, overlay_value),
@@ -111,6 +168,10 @@ fn default_train_split_ratio() -> f32 {
 
 fn default_temperature() -> f32 {
     1.0
+}
+
+fn default_step_gamma() -> f64 {
+    0.1
 }
 
 #[cfg(test)]
@@ -148,6 +209,11 @@ mod tests {
             "learning_rate = 0.001",
             "weight_decay = 0.05",
             "",
+            "[optimizer.lr_schedule]",
+            "type = \"cosine\"",
+            "min_lr = 0.00005",
+            "num_iters = 100",
+            "",
             "[generation]",
             "prompt = \"Base prompt\"",
             "max_tokens = 64",
@@ -173,6 +239,11 @@ mod tests {
             "[optimizer]",
             "learning_rate = 0.0005",
             "",
+            "[optimizer.lr_schedule]",
+            "type = \"linear\"",
+            "final_lr = 0.0002",
+            "num_iters = 50",
+            "",
             "[model]",
             "n_embd = 320",
             "fused_kernels = true",
@@ -194,6 +265,14 @@ mod tests {
         );
         assert!((config.optimizer.learning_rate - 0.0005).abs() < f64::EPSILON);
         assert!((config.optimizer.weight_decay - 0.05).abs() < f32::EPSILON);
+        assert_eq!(
+            config.optimizer.lr_schedule,
+            Some(LearningRateScheduleConfig::Linear {
+                initial_lr: None,
+                final_lr: 0.0002,
+                num_iters: Some(50),
+            })
+        );
         assert!((config.dataset.train_split_ratio - 0.8).abs() < f32::EPSILON);
         assert_eq!(config.generation.max_tokens, 64);
         assert_eq!(config.model.n_layer, Some(6));
@@ -204,5 +283,21 @@ mod tests {
         assert_eq!(config.model.fused_kernels, Some(true));
         assert_eq!(config.model.block_size, Some(256));
         assert_eq!(config.model.use_alibi, Some(false));
+    }
+
+    #[test]
+    fn schedule_constant_round_trips() {
+        let text = r#"
+            learning_rate = 0.002
+            weight_decay = 0.1
+
+            [lr_schedule]
+            type = "constant"
+        "#;
+        let optimizer: OptimizerConfig = toml::from_str(text).expect("parse optimizer config");
+        assert_eq!(
+            optimizer.lr_schedule,
+            Some(LearningRateScheduleConfig::Constant { initial_lr: None })
+        );
     }
 }

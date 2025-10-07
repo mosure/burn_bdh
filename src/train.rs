@@ -1,7 +1,7 @@
 #![recursion_limit = "512"]
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
@@ -9,7 +9,16 @@ use clap::{Parser, ValueEnum};
 
 use burn::LearningRate;
 use burn::data::dataloader::DataLoader;
-use burn::optim::AdamWConfig;
+use burn::lr_scheduler::{
+    LrScheduler,
+    cosine::{CosineAnnealingLrScheduler, CosineAnnealingLrSchedulerConfig},
+    exponential::{ExponentialLrScheduler, ExponentialLrSchedulerConfig},
+    linear::{LinearLrScheduler, LinearLrSchedulerConfig},
+    noam::{NoamLrScheduler, NoamLrSchedulerConfig},
+    step::{StepLrScheduler, StepLrSchedulerConfig},
+};
+use burn::optim::adaptor::OptimizerAdaptor;
+use burn::optim::{AdamW, AdamWConfig};
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
@@ -25,9 +34,10 @@ use burn::record::{BinFileRecorder, FullPrecisionSettings};
 
 use burn_dragon_hatchling::wgpu::init_runtime;
 use burn_dragon_hatchling::{
-    BDH, BDHConfig, DatasetConfig, GenerationConfig, ModelOverrides, ShakespeareBatch,
-    ShakespeareDataset, ShakespeareRandomDataLoader, ShakespeareSplit, TrainingConfig,
-    TrainingHyperparameters, language_model_loss, load_training_config,
+    BDH, BDHConfig, DatasetConfig, GenerationConfig, LearningRateScheduleConfig, ModelOverrides,
+    OptimizerConfig, ShakespeareBatch, ShakespeareDataset, ShakespeareRandomDataLoader,
+    ShakespeareSplit, TrainingConfig, TrainingHyperparameters, language_model_loss,
+    load_training_config,
 };
 
 #[derive(Parser, Debug)]
@@ -89,6 +99,8 @@ impl<B: AutodiffBackend> ItemLazy for LanguageModelTrainItem<B> {
         LanguageModelOutput::new(self.loss.inner())
     }
 }
+
+type ValidBackend<B> = <B as AutodiffBackend>::InnerBackend;
 
 impl<B: AutodiffBackend> TrainStep<ShakespeareBatch<B>, LanguageModelTrainItem<B>> for BDH<B> {
     fn step(&self, batch: ShakespeareBatch<B>) -> TrainOutput<LanguageModelTrainItem<B>> {
@@ -177,7 +189,6 @@ where
             train_steps,
         ));
 
-    type ValidBackend<B> = <B as AutodiffBackend>::InnerBackend;
     let valid_device = device.clone();
     let valid_loader: Arc<dyn DataLoader<ValidBackend<B>, ShakespeareBatch<ValidBackend<B>>>> =
         Arc::new(ShakespeareRandomDataLoader::<ValidBackend<B>>::new(
@@ -187,34 +198,89 @@ where
             valid_steps,
         ));
 
-    let model = BDH::<B>::new(model_config.clone(), &device);
-    let optim = AdamWConfig::new()
-        .with_weight_decay(optimizer_cfg.weight_decay)
-        .init::<B, BDH<B>>();
-    let lr: LearningRate = optimizer_cfg.learning_rate;
+    let mut model = Some(BDH::<B>::new(model_config.clone(), &device));
+    let mut optim = Some(
+        AdamWConfig::new()
+            .with_weight_decay(optimizer_cfg.weight_decay)
+            .init::<B, BDH<B>>(),
+    );
+    let scheduler = resolve_lr_scheduler(optimizer_cfg, training, &model_config)?;
 
     let run_dir = PathBuf::from("runs").join(backend_name);
-    fs::create_dir_all(&run_dir)?;
-
-    let builder = LearnerBuilder::new(&run_dir)
-        .num_epochs(1)
-        .devices(vec![device.clone()])
-        .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
-        .metric_train_numeric(LossMetric::<ValidBackend<B>>::new())
-        .metric_valid_numeric(LossMetric::<ValidBackend<B>>::new())
-        .metric_train_numeric(LearningRateMetric::new())
-        .summary();
-
-    let learner = builder.build(model, optim, lr);
-
-    log_theoretical_profile(
-        &model_config,
-        training.batch_size,
-        training.block_size,
-        backend_name,
-    );
-
-    let model = learner.fit(train_loader, valid_loader);
+    let model = match scheduler {
+        ResolvedLrScheduler::Constant(lr) => train_with_scheduler(
+            &run_dir,
+            backend_name,
+            training,
+            &model_config,
+            &device,
+            model.take().expect("model initialized"),
+            optim.take().expect("optimizer initialized"),
+            lr,
+            Arc::clone(&train_loader),
+            Arc::clone(&valid_loader),
+        )?,
+        ResolvedLrScheduler::Cosine(scheduler) => train_with_scheduler(
+            &run_dir,
+            backend_name,
+            training,
+            &model_config,
+            &device,
+            model.take().expect("model initialized"),
+            optim.take().expect("optimizer initialized"),
+            scheduler,
+            Arc::clone(&train_loader),
+            Arc::clone(&valid_loader),
+        )?,
+        ResolvedLrScheduler::Linear(scheduler) => train_with_scheduler(
+            &run_dir,
+            backend_name,
+            training,
+            &model_config,
+            &device,
+            model.take().expect("model initialized"),
+            optim.take().expect("optimizer initialized"),
+            scheduler,
+            Arc::clone(&train_loader),
+            Arc::clone(&valid_loader),
+        )?,
+        ResolvedLrScheduler::Exponential(scheduler) => train_with_scheduler(
+            &run_dir,
+            backend_name,
+            training,
+            &model_config,
+            &device,
+            model.take().expect("model initialized"),
+            optim.take().expect("optimizer initialized"),
+            scheduler,
+            Arc::clone(&train_loader),
+            Arc::clone(&valid_loader),
+        )?,
+        ResolvedLrScheduler::Step(scheduler) => train_with_scheduler(
+            &run_dir,
+            backend_name,
+            training,
+            &model_config,
+            &device,
+            model.take().expect("model initialized"),
+            optim.take().expect("optimizer initialized"),
+            scheduler,
+            Arc::clone(&train_loader),
+            Arc::clone(&valid_loader),
+        )?,
+        ResolvedLrScheduler::Noam(scheduler) => train_with_scheduler(
+            &run_dir,
+            backend_name,
+            training,
+            &model_config,
+            &device,
+            model.take().expect("model initialized"),
+            optim.take().expect("optimizer initialized"),
+            scheduler,
+            Arc::clone(&train_loader),
+            Arc::clone(&valid_loader),
+        )?,
+    };
 
     info!("Training complete on {backend_name}. Generating sample...");
     generate_sample::<B>(
@@ -226,6 +292,137 @@ where
     )?;
 
     Ok(())
+}
+
+enum ResolvedLrScheduler {
+    Constant(LearningRate),
+    Cosine(CosineAnnealingLrScheduler),
+    Linear(LinearLrScheduler),
+    Exponential(ExponentialLrScheduler),
+    Step(StepLrScheduler),
+    Noam(NoamLrScheduler),
+}
+
+fn train_with_scheduler<B, S>(
+    run_dir: &Path,
+    backend_name: &str,
+    training: &TrainingHyperparameters,
+    model_config: &BDHConfig,
+    device: &B::Device,
+    model: BDH<B>,
+    optimizer: OptimizerAdaptor<AdamW, BDH<B>, B>,
+    scheduler: S,
+    train_loader: Arc<dyn DataLoader<B, ShakespeareBatch<B>>>,
+    valid_loader: Arc<dyn DataLoader<ValidBackend<B>, ShakespeareBatch<ValidBackend<B>>>>,
+) -> Result<BDH<B>>
+where
+    B: AutodiffBackend + Clone + 'static,
+    B::Device: Clone,
+    S: LrScheduler + 'static,
+{
+    fs::create_dir_all(run_dir)?;
+
+    let builder = LearnerBuilder::new(run_dir)
+        .num_epochs(1)
+        .devices(vec![device.clone()])
+        .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
+        .metric_train_numeric(LossMetric::<ValidBackend<B>>::new())
+        .metric_valid_numeric(LossMetric::<ValidBackend<B>>::new())
+        .metric_train_numeric(LearningRateMetric::new())
+        .summary();
+
+    let learner = builder.build(model, optimizer, scheduler);
+
+    log_theoretical_profile(
+        model_config,
+        training.batch_size,
+        training.block_size,
+        backend_name,
+    );
+
+    Ok(learner.fit(train_loader, valid_loader))
+}
+
+fn resolve_lr_scheduler(
+    optimizer_cfg: &OptimizerConfig,
+    training: &TrainingHyperparameters,
+    model_config: &BDHConfig,
+) -> Result<ResolvedLrScheduler> {
+    let base_lr = optimizer_cfg.learning_rate;
+    let fallback_iters = training.max_iters.max(1);
+
+    let schedule = match &optimizer_cfg.lr_schedule {
+        None => ResolvedLrScheduler::Constant(base_lr),
+        Some(LearningRateScheduleConfig::Constant { initial_lr }) => {
+            ResolvedLrScheduler::Constant(initial_lr.unwrap_or(base_lr))
+        }
+        Some(LearningRateScheduleConfig::Cosine {
+            initial_lr,
+            min_lr,
+            num_iters,
+        }) => {
+            let init_lr = initial_lr.unwrap_or(base_lr);
+            let scheduler = CosineAnnealingLrSchedulerConfig::new(
+                init_lr,
+                num_iters.unwrap_or(fallback_iters).max(1),
+            )
+            .with_min_lr(min_lr.unwrap_or(0.0))
+            .init()
+            .map_err(|err| anyhow!("failed to initialize cosine lr scheduler: {err}"))?;
+            ResolvedLrScheduler::Cosine(scheduler)
+        }
+        Some(LearningRateScheduleConfig::Linear {
+            initial_lr,
+            final_lr,
+            num_iters,
+        }) => {
+            let init_lr = initial_lr.unwrap_or(base_lr);
+            let scheduler = LinearLrSchedulerConfig::new(
+                init_lr,
+                *final_lr,
+                num_iters.unwrap_or(fallback_iters).max(1),
+            )
+            .init()
+            .map_err(|err| anyhow!("failed to initialize linear lr scheduler: {err}"))?;
+            ResolvedLrScheduler::Linear(scheduler)
+        }
+        Some(LearningRateScheduleConfig::Exponential { initial_lr, gamma }) => {
+            let init_lr = initial_lr.unwrap_or(base_lr);
+            let scheduler = ExponentialLrSchedulerConfig::new(init_lr, *gamma)
+                .init()
+                .map_err(|err| anyhow!("failed to initialize exponential lr scheduler: {err}"))?;
+            ResolvedLrScheduler::Exponential(scheduler)
+        }
+        Some(LearningRateScheduleConfig::Step {
+            initial_lr,
+            gamma,
+            step_size,
+        }) => {
+            let init_lr = initial_lr.unwrap_or(base_lr);
+            let scheduler =
+                StepLrSchedulerConfig::new(init_lr, step_size.unwrap_or(fallback_iters).max(1))
+                    .with_gamma(*gamma)
+                    .init()
+                    .map_err(|err| anyhow!("failed to initialize step lr scheduler: {err}"))?;
+            ResolvedLrScheduler::Step(scheduler)
+        }
+        Some(LearningRateScheduleConfig::Noam {
+            initial_lr,
+            warmup_steps,
+            model_size,
+        }) => {
+            let init_lr = initial_lr.unwrap_or(base_lr);
+            let mut config = NoamLrSchedulerConfig::new(init_lr);
+            config = config.with_warmup_steps(warmup_steps.unwrap_or(fallback_iters).max(1));
+            config = config.with_model_size(model_size.unwrap_or(model_config.n_embd).max(1));
+            let scheduler = config
+                .init()
+                .map_err(|err| anyhow!("failed to initialize noam lr scheduler: {err}"))?;
+            ResolvedLrScheduler::Noam(scheduler)
+        }
+    };
+
+    Ok(schedule)
 }
 
 fn prepare_dataset(

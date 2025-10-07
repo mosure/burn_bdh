@@ -7,8 +7,8 @@ pub mod model;
 pub mod wgpu;
 
 pub use config::{
-    DatasetConfig, GenerationConfig, ModelOverrides, OptimizerConfig, TrainingConfig,
-    TrainingHyperparameters, load_training_config,
+    DatasetConfig, GenerationConfig, LearningRateScheduleConfig, ModelOverrides, OptimizerConfig,
+    TrainingConfig, TrainingHyperparameters, load_training_config,
 };
 pub use dataset::{
     ShakespeareBatch, ShakespeareDataset, ShakespeareRandomDataLoader, ShakespeareSplit,
