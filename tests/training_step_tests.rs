@@ -5,6 +5,7 @@ use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::Backend as BackendTrait;
 use burn_autodiff::Autodiff;
 use burn_dragon_hatchling::dataset::{ShakespeareDataset, ShakespeareSplit};
+use burn_dragon_hatchling::tokenizer::TokenizerConfig;
 use burn_dragon_hatchling::{BDH, BDHConfig, language_model_loss};
 use burn_ndarray::NdArray;
 use tempfile::tempdir;
@@ -20,13 +21,18 @@ fn single_training_step_executes() {
 
     let block_size = 32;
     let batch_size = 4;
-    let dataset = ShakespeareDataset::new(cache_dir, block_size, batch_size, 0.9).expect("dataset");
+    let tokenizer = TokenizerConfig::default();
+    let dataset = ShakespeareDataset::new(cache_dir, block_size, batch_size, 0.9, &tokenizer)
+        .expect("dataset");
 
     type Backend = Autodiff<NdArray<f32>>;
     <Backend as BackendTrait>::seed(123);
     let device = <Backend as BackendTrait>::Device::default();
 
-    let model = BDH::<Backend>::new(BDHConfig::default(), &device);
+    let mut model_config = BDHConfig::default();
+    let vocab = dataset.tokenizer();
+    model_config.vocab_size = vocab.len();
+    let model = BDH::<Backend>::new(model_config, &device);
     let mut optimizer = AdamWConfig::new()
         .with_weight_decay(0.1)
         .init::<Backend, BDH<Backend>>();

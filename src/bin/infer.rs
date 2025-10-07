@@ -8,6 +8,7 @@ use burn::module::Module;
 use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
+use burn_dragon_hatchling::tokenizer::Tokenizer;
 use burn_dragon_hatchling::wgpu::init_runtime;
 use burn_dragon_hatchling::{
     BDH, BDHConfig, GenerationConfig, ModelOverrides, TrainingConfig, TrainingHyperparameters,
@@ -63,6 +64,24 @@ where
     let device = B::Device::default();
     init_backend(&device);
 
+    let tokenizer_path = config
+        .dataset
+        .tokenizer
+        .storage_path(&config.dataset.cache_dir);
+    let tokenizer = if let Some(path) = tokenizer_path {
+        config
+            .dataset
+            .tokenizer
+            .load(&path)
+            .with_context(|| format!("failed to load tokenizer {}", path.display()))?
+    } else {
+        config
+            .dataset
+            .tokenizer
+            .fit(std::iter::empty::<&str>())
+            .context("failed to initialize tokenizer")?
+    };
+
     let checkpoint_dir = args
         .checkpoint
         .clone()
@@ -70,7 +89,9 @@ where
     let (checkpoint_base, epoch) =
         resolve_checkpoint_base(&checkpoint_dir, args.epoch, backend_name)?;
 
-    let mut model = BDH::<B>::new(build_model_config(&config.model), &device);
+    let mut model_config = build_model_config(&config.model);
+    model_config.vocab_size = tokenizer.len();
+    let mut model = BDH::<B>::new(model_config, &device);
     let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
     let record = recorder
         .load::<<BDH<B> as Module<B>>::Record>(checkpoint_base.clone(), &device)
@@ -85,7 +106,13 @@ where
     let mut generation = config.generation.clone();
     apply_generation_overrides(&mut generation, args);
 
-    let output = generate_text::<B>(&model, &device, &config.training, &generation)?;
+    let output = generate_text::<B>(
+        &model,
+        tokenizer.as_ref(),
+        &device,
+        &config.training,
+        &generation,
+    )?;
 
     eprintln!(
         "Loaded epoch {epoch} from {} using {backend_name} backend.",
@@ -149,22 +176,18 @@ fn apply_generation_overrides(generation: &mut GenerationConfig, args: &Args) {
 
 fn generate_text<B: Backend>(
     model: &BDH<B>,
+    tokenizer: &dyn Tokenizer,
     device: &B::Device,
     training: &TrainingHyperparameters,
     generation: &GenerationConfig,
 ) -> Result<String> {
-    let mut prompt_tokens: Vec<i64> = generation
-        .prompt
-        .as_bytes()
-        .iter()
-        .map(|b| *b as i64)
-        .collect();
-
-    if prompt_tokens.len() > training.block_size {
-        prompt_tokens = prompt_tokens[prompt_tokens.len() - training.block_size..].to_vec();
+    let mut prompt_ids = tokenizer.encode(&generation.prompt, false, false);
+    if prompt_ids.len() > training.block_size {
+        prompt_ids = prompt_ids[prompt_ids.len() - training.block_size..].to_vec();
     }
 
-    let prompt_len = prompt_tokens.len();
+    let prompt_len = prompt_ids.len();
+    let prompt_tokens: Vec<i64> = prompt_ids.iter().map(|&id| id as i64).collect();
     let prompt_tensor =
         Tensor::<B, 2, Int>::from_data(TensorData::new(prompt_tokens, [1, prompt_len]), device);
 
@@ -181,8 +204,11 @@ fn generate_text<B: Backend>(
         .into_vec::<i64>()
         .map_err(|err| anyhow!("{err:?}"))?;
 
-    let bytes: Vec<u8> = tokens.iter().map(|&tok| tok as u8).collect();
-    Ok(String::from_utf8_lossy(&bytes).to_string())
+    let decoded_ids: Vec<u32> = tokens
+        .iter()
+        .filter_map(|&tok| (tok >= 0).then(|| tok as u32))
+        .collect();
+    Ok(tokenizer.decode(&decoded_ids))
 }
 
 fn resolve_checkpoint_base(

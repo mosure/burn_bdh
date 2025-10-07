@@ -31,7 +31,7 @@ burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2
 
 ## training
 
-- `cargo run --release -- --config ./config/dev.toml` (defaults to the cuda backend)
+- `cargo run --release` (defaults to the cuda backend)
 
 
 ## benchmarks

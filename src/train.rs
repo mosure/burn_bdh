@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use clap::{Parser, ValueEnum};
+use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
 
 use burn::LearningRate;
 use burn::data::dataloader::DataLoader;
@@ -42,13 +42,27 @@ use burn_dragon_hatchling::{
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Train the Baby Dragon Hatchling model")]
-struct Args {
+struct Cli {
+    #[command(flatten)]
+    train: TrainArgs,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(ClapArgs, Debug)]
+struct TrainArgs {
     /// Additional configuration files applied in order (later files override earlier ones).
-    #[arg(short = 'c', long = "config", value_name = "PATH")]
+    #[arg(short = 'c', long = "config", value_name = "PATH", global = true)]
     config: Vec<PathBuf>,
     /// Backend to use for training.
     #[arg(long, value_enum, default_value_t = BackendArg::Cuda)]
     backend: BackendArg,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Build the character-level vocabulary and exit.
+    BuildVocab,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -128,15 +142,20 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let args = Args::parse();
+    let args = Cli::parse();
 
     let mut config_paths = vec![PathBuf::from("config/base.toml")];
-    config_paths.extend(args.config);
+    config_paths.extend(args.train.config.clone());
     let config = load_training_config(&config_paths)?;
+
+    if matches!(args.command, Some(Command::BuildVocab)) {
+        build_vocab_only(&config)?;
+        return Ok(());
+    }
 
     let dataset = Arc::new(prepare_dataset(&config.dataset, &config.training)?);
 
-    match args.backend {
+    match args.train.backend {
         BackendArg::Wgpu => train_backend::<Autodiff<Wgpu<f32>>, _>(
             &config,
             Arc::clone(&dataset),
@@ -176,7 +195,9 @@ where
     let training = &config.training;
     let optimizer_cfg = &config.optimizer;
 
-    let model_config = build_model_config(&config.model);
+    let mut model_config = build_model_config(&config.model);
+    let tokenizer = dataset.tokenizer();
+    model_config.vocab_size = tokenizer.len();
 
     let steps_per_epoch = dataset.steps_per_epoch(ShakespeareSplit::Train);
     let total_steps = training.max_iters.max(1);
@@ -419,17 +440,58 @@ fn resolve_lr_scheduler(
     Ok(schedule)
 }
 
+fn build_vocab_only(config: &TrainingConfig) -> Result<()> {
+    let dataset = prepare_dataset(&config.dataset, &config.training)?;
+    let tokenizer = dataset.tokenizer();
+    info!(
+        "Tokenizer `{}` ready with {} tokens",
+        config.dataset.tokenizer.kind_name(),
+        tokenizer.len()
+    );
+    Ok(())
+}
+
 fn prepare_dataset(
     dataset_cfg: &DatasetConfig,
     training: &TrainingHyperparameters,
 ) -> Result<ShakespeareDataset> {
-    ShakespeareDataset::new(
+    let tokenizer_path = dataset_cfg.tokenizer.storage_path(&dataset_cfg.cache_dir);
+    let tokenizer_preexists = tokenizer_path
+        .as_ref()
+        .map(|path| path.is_file())
+        .unwrap_or(false);
+
+    let dataset = ShakespeareDataset::new(
         &dataset_cfg.cache_dir,
         training.block_size,
         training.batch_size,
         dataset_cfg.train_split_ratio,
+        &dataset_cfg.tokenizer,
     )
-    .with_context(|| "failed to prepare Shakespeare dataset")
+    .with_context(|| "failed to prepare Shakespeare dataset")?;
+
+    let tokenizer = dataset.tokenizer();
+    match tokenizer_path {
+        Some(path) if tokenizer_preexists => info!(
+            "Loaded {} tokenizer with {} tokens from {}",
+            dataset_cfg.tokenizer.kind_name(),
+            tokenizer.len(),
+            path.display()
+        ),
+        Some(path) => info!(
+            "Built {} tokenizer with {} tokens at {}",
+            dataset_cfg.tokenizer.kind_name(),
+            tokenizer.len(),
+            path.display()
+        ),
+        None => info!(
+            "Initialized {} tokenizer with {} tokens (no persistence required)",
+            dataset_cfg.tokenizer.kind_name(),
+            tokenizer.len()
+        ),
+    };
+
+    Ok(dataset)
 }
 
 fn build_model_config(overrides: &ModelOverrides) -> BDHConfig {
@@ -501,18 +563,18 @@ fn generate_sample<B: BackendTrait>(
     block_size: usize,
     generation: &GenerationConfig,
 ) -> Result<()> {
-    let mut prompt_bytes: Vec<i64> = generation
-        .prompt
-        .as_bytes()
-        .iter()
-        .map(|byte| *byte as i64)
+    let tokenizer = dataset.tokenizer();
+    let mut prompt_tokens: Vec<i64> = tokenizer
+        .encode(&generation.prompt, false, false)
+        .into_iter()
+        .map(|id| id as i64)
         .collect();
-    if prompt_bytes.len() > block_size {
-        prompt_bytes = prompt_bytes[prompt_bytes.len() - block_size..].to_vec();
+    if prompt_tokens.len() > block_size {
+        prompt_tokens = prompt_tokens[prompt_tokens.len() - block_size..].to_vec();
     }
-    let prompt_len = prompt_bytes.len();
+    let prompt_len = prompt_tokens.len();
     let prompt =
-        Tensor::<B, 2, Int>::from_data(TensorData::new(prompt_bytes, [1, prompt_len]), device);
+        Tensor::<B, 2, Int>::from_data(TensorData::new(prompt_tokens, [1, prompt_len]), device);
 
     let generated = model.generate(
         prompt,

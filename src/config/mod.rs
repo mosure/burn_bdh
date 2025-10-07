@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
+
+use crate::tokenizer::TokenizerConfig;
 use toml::Value;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -10,6 +12,8 @@ pub struct DatasetConfig {
     pub cache_dir: PathBuf,
     #[serde(default = "default_train_split_ratio")]
     pub train_split_ratio: f32,
+    #[serde(default)]
+    pub tokenizer: TokenizerConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -273,6 +277,7 @@ mod tests {
                 num_iters: Some(50),
             })
         );
+        assert_eq!(config.dataset.tokenizer, TokenizerConfig::default());
         assert!((config.dataset.train_split_ratio - 0.8).abs() < f32::EPSILON);
         assert_eq!(config.generation.max_tokens, 64);
         assert_eq!(config.model.n_layer, Some(6));

@@ -9,6 +9,8 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 use rand::prelude::*;
 
+use crate::tokenizer::{SharedTokenizer, TokenizerConfig};
+
 const SHAKESPEARE_URL: &str =
     "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt";
 
@@ -20,11 +22,12 @@ pub enum ShakespeareSplit {
 
 #[derive(Clone)]
 pub struct ShakespeareDataset {
-    data: Vec<u8>,
+    tokens: Vec<u32>,
     train_len: usize,
     block_size: usize,
     batch_size: usize,
     train_split_ratio: f32,
+    tokenizer: SharedTokenizer,
 }
 
 impl ShakespeareDataset {
@@ -33,6 +36,7 @@ impl ShakespeareDataset {
         block_size: usize,
         batch_size: usize,
         train_split_ratio: f32,
+        tokenizer_cfg: &TokenizerConfig,
     ) -> io::Result<Self> {
         let cache_dir = cache_dir.as_ref();
         fs::create_dir_all(cache_dir)?;
@@ -42,37 +46,69 @@ impl ShakespeareDataset {
             download_shakespeare(&input_path)?;
         }
 
-        let data = fs::read(&input_path)?;
-        if data.len() <= block_size + 1 {
+        let text = fs::read_to_string(&input_path)?;
+
+        let split_ratio = train_split_ratio.clamp(0.0, 1.0);
+
+        let tokenizer_path = tokenizer_cfg.storage_path(cache_dir);
+        let tokenizer = if let Some(path) = tokenizer_path {
+            if path.is_file() {
+                tokenizer_cfg
+                    .load(&path)
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?
+            } else {
+                let tokenizer = tokenizer_cfg
+                    .fit(std::iter::once(text.as_str()))
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+                tokenizer_cfg
+                    .save(&*tokenizer, &path)
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+                tokenizer
+            }
+        } else {
+            tokenizer_cfg
+                .fit(std::iter::once(text.as_str()))
+                .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?
+        };
+
+        tokenizer_cfg
+            .validate_corpus(&*tokenizer, text.as_str())
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+
+        let tokens = tokenizer.encode(text.as_str(), false, false);
+        if tokens.len() <= block_size + 1 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "dataset content smaller than block size",
+                "encoded dataset smaller than block size",
             ));
         }
 
-        let mut train_len = ((data.len() as f32) * train_split_ratio.clamp(0.0, 1.0)) as usize;
+        let mut train_len = ((tokens.len() as f32) * split_ratio) as usize;
         let min_len = block_size + 1;
-        let max_len = data.len() - 1;
+        let max_len = tokens.len() - 1;
         if train_len < min_len {
             train_len = min_len;
         } else if train_len > max_len {
             train_len = max_len;
         }
 
-        Ok(Self {
-            data,
+        let dataset = Self {
+            tokens,
             train_len,
             block_size,
             batch_size,
-            train_split_ratio: train_split_ratio.clamp(0.0, 1.0),
-        })
+            train_split_ratio: split_ratio,
+            tokenizer: tokenizer.clone(),
+        };
+
+        Ok(dataset)
     }
 
     fn split_offset_and_span(&self, split: ShakespeareSplit) -> (usize, usize) {
         match split {
             ShakespeareSplit::Train => (0, self.train_len),
             ShakespeareSplit::Val => {
-                let remaining = self.data.len().saturating_sub(self.train_len);
+                let remaining = self.tokens.len().saturating_sub(self.train_len);
                 if remaining <= self.block_size + 1 {
                     (0, self.train_len)
                 } else {
@@ -113,8 +149,8 @@ impl ShakespeareDataset {
             let start = offset + start_offset;
             for t in 0..self.block_size {
                 let data_idx = start + t;
-                inputs[batch_idx * self.block_size + t] = self.data[data_idx] as i64;
-                targets[batch_idx * self.block_size + t] = self.data[data_idx + 1] as i64;
+                inputs[batch_idx * self.block_size + t] = self.tokens[data_idx] as i64;
+                targets[batch_idx * self.block_size + t] = self.tokens[data_idx + 1] as i64;
             }
         }
 
@@ -131,8 +167,15 @@ impl ShakespeareDataset {
     }
 
     pub fn decode(&self, tokens: &[i64]) -> String {
-        let bytes: Vec<u8> = tokens.iter().map(|&tok| tok as u8).collect();
-        String::from_utf8_lossy(&bytes).to_string()
+        let ids: Vec<u32> = tokens
+            .iter()
+            .filter_map(|&tok| (tok >= 0).then(|| tok as u32))
+            .collect();
+        self.tokenizer.decode(&ids)
+    }
+
+    pub fn tokenizer(&self) -> SharedTokenizer {
+        self.tokenizer.clone()
     }
 
     pub fn train_split_ratio(&self) -> f32 {
