@@ -148,11 +148,11 @@ fn log_theoretical_profile(config: &BDHConfig, cfg: &TrainConfig) {
 }
 
 fn compute_latent_per_head(config: &BDHConfig) -> usize {
-    (config.mlp_internal_dim_multiplier * config.n_embd) / config.n_head
+    config.latent_per_head()
 }
 
 fn compute_latent_total(config: &BDHConfig) -> usize {
-    compute_latent_per_head(config) * config.n_head
+    config.latent_total()
 }
 
 criterion_group!(benches, training_step_bench);

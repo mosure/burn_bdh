@@ -2,6 +2,7 @@ mod attention;
 mod bdh;
 mod config;
 mod loss;
+mod router;
 
 pub use bdh::BDH;
 pub use config::{BDHConfig, FusedKernelConfig};
