@@ -22,7 +22,9 @@ burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2
 - [ ] fused kernels
 - [ ] hierarchical, memory-aware recurrent state
 - [ ] mixture-of-expert routing
+- [ ] multi modal architecture
 - [ ] neuromorphic backend
+- [ ] rl reasoning training
 - [ ] streaming, sparse synaptic backpropagation
 - [ ] temporal neuron dampening
 
