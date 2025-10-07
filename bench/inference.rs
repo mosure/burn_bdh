@@ -4,7 +4,10 @@ use burn::tensor::backend::Backend as BackendTrait;
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_dragon_hatchling::{BDH, BDHConfig, wgpu::init_runtime};
 use burn_wgpu::Wgpu;
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+
+#[cfg(feature = "cuda")]
+use burn_cuda::Cuda;
 
 #[derive(Clone, Copy)]
 struct InferenceConfig {
@@ -12,9 +15,6 @@ struct InferenceConfig {
     batch: usize,
     block: usize,
 }
-
-const STORAGE_BUFFER_LIMIT_BYTES: u64 = 1 << 30; // 1 GiB, wgpu storage buffer cap on most drivers
-const FLOAT_BYTES: u64 = std::mem::size_of::<f32>() as u64;
 
 const INFERENCE_CONFIGS: &[InferenceConfig] = &[
     InferenceConfig {
@@ -34,53 +34,84 @@ const INFERENCE_CONFIGS: &[InferenceConfig] = &[
     },
 ];
 
+const STORAGE_BUFFER_LIMIT_BYTES: u64 = 1 << 30; // ~1 GiB limit on most wgpu drivers
+const FLOAT_BYTES: u64 = std::mem::size_of::<f32>() as u64;
+
 fn inference_bench(c: &mut Criterion) {
-    type Backend = Wgpu<f32>;
-    <Backend as BackendTrait>::seed(42);
-    let device = <Backend as BackendTrait>::Device::default();
-    init_runtime(&device);
+    run_inference_backend::<Wgpu<f32>, _, _>(
+        c,
+        "wgpu",
+        |device| init_runtime(device),
+        |config, cfg| skip_reason_wgpu(config, cfg),
+    );
+
+    #[cfg(feature = "cuda")]
+    run_inference_backend::<Cuda<f32>, _, _>(c, "cuda", |_| {}, |_, _| None);
+}
+
+fn run_inference_backend<B, Init, Skip>(
+    c: &mut Criterion,
+    backend_name: &'static str,
+    init_backend: Init,
+    skip_reason: Skip,
+) where
+    B: BackendTrait + Clone + 'static,
+    Init: Fn(&<B as BackendTrait>::Device),
+    Skip: Fn(&BDHConfig, &InferenceConfig) -> Option<String>,
+{
+    <B as BackendTrait>::seed(42);
+    let device = <B as BackendTrait>::Device::default();
+    init_backend(&device);
 
     let model_config = BDHConfig::default();
+    let mut group = c.benchmark_group(format!("bdh_inference_forward/{backend_name}"));
 
     for cfg in INFERENCE_CONFIGS {
-        let estimated_bytes = estimated_query_tensor_bytes(&model_config, cfg);
-        if estimated_bytes > STORAGE_BUFFER_LIMIT_BYTES as u128 {
+        if let Some(reason) = skip_reason(&model_config, cfg) {
             log_theoretical_profile(&model_config, cfg);
-            let requested_gib = estimated_bytes as f64 / (1024.0_f64 * 1024.0_f64 * 1024.0_f64);
-            let limit_gib =
-                STORAGE_BUFFER_LIMIT_BYTES as f64 / (1024.0_f64 * 1024.0_f64 * 1024.0_f64);
             println!(
-                "[inference:{name}] skipping: query tensor needs {requested_gib:.2} GiB, \
-                 wgpu storage buffers support up to {limit_gib:.2} GiB. \
-                 Reduce batch/sequence length or the MLP multiplier to run this case.",
-                name = cfg.name
+                "[inference:{name}@{backend}] skipping: {reason}",
+                name = cfg.name,
+                backend = backend_name
             );
             continue;
         }
 
-        let model = BDH::<Backend>::new(model_config.clone(), &device);
+        let model = BDH::<B>::new(model_config.clone(), &device);
         let token_count = cfg.batch * cfg.block;
         let tokens: Vec<i64> = (0..token_count).map(|idx| (idx % 255) as i64).collect();
-        let input = Tensor::<Backend, 2, Int>::from_data(
+        let input = Tensor::<B, 2, Int>::from_data(
             TensorData::new(tokens, [cfg.batch, cfg.block]),
             &device,
         );
 
-        // Warm-up: ensures shader compilation and graph building are not part of the timed runs.
+        // Warm-up ensures shader compilation / graph construction is amortized.
         let _ = model.forward(input.clone()).into_data();
 
         log_theoretical_profile(&model_config, cfg);
 
-        c.bench_with_input(
-            BenchmarkId::new("bdh_inference_forward", cfg.name),
-            cfg,
-            |b, _| {
-                b.iter(|| {
-                    let _ = model.forward(input.clone());
-                });
-            },
-        );
+        group.throughput(Throughput::Elements(token_count as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(cfg.name), cfg, |b, _| {
+            b.iter(|| {
+                let _ = model.forward(input.clone()).into_data();
+            });
+        });
     }
+
+    group.finish();
+}
+
+fn skip_reason_wgpu(config: &BDHConfig, cfg: &InferenceConfig) -> Option<String> {
+    let estimated_bytes = estimated_query_tensor_bytes(config, cfg);
+    if estimated_bytes > STORAGE_BUFFER_LIMIT_BYTES as u128 {
+        let requested_gib = estimated_bytes as f64 / (1024.0_f64.powi(3));
+        let limit_gib = STORAGE_BUFFER_LIMIT_BYTES as f64 / (1024.0_f64.powi(3));
+        return Some(format!(
+            "query tensor needs {requested_gib:.2} GiB but wgpu storage buffers cap at \
+             {limit_gib:.2} GiB; reduce batch/sequence length or the MLP multiplier."
+        ));
+    }
+    None
 }
 
 fn log_theoretical_profile(config: &BDHConfig, cfg: &InferenceConfig) {
@@ -99,7 +130,8 @@ fn log_theoretical_profile(config: &BDHConfig, cfg: &InferenceConfig) {
     let total = encoder_matmul + attn_scores + attn_value + decoder_matmul;
 
     println!(
-        "[inference:{name}] approx GFLOPs per forward: total={total_gflops:.2}, encoder={enc:.2}, attn_scores={scores:.2}, attn_value={value:.2}, decoder={dec:.2}",
+        "[inference:{name}] approx GFLOPs per forward: total={total_gflops:.2}, encoder={enc:.2}, \
+         attn_scores={scores:.2}, attn_value={value:.2}, decoder={dec:.2}",
         name = cfg.name,
         total_gflops = total as f64 / 1e9,
         enc = encoder_matmul as f64 / 1e9,
@@ -117,9 +149,6 @@ fn compute_latent_total(config: &BDHConfig) -> usize {
     compute_latent_per_head(config) * config.n_head
 }
 
-criterion_group!(benches, inference_bench);
-criterion_main!(benches);
-
 fn estimated_query_tensor_bytes(config: &BDHConfig, cfg: &InferenceConfig) -> u128 {
     let batch = cfg.batch as u128;
     let time = cfg.block as u128;
@@ -128,3 +157,6 @@ fn estimated_query_tensor_bytes(config: &BDHConfig, cfg: &InferenceConfig) -> u1
 
     batch * heads * time * latent_per_head * (FLOAT_BYTES as u128)
 }
+
+criterion_group!(benches, inference_bench);
+criterion_main!(benches);

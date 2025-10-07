@@ -31,9 +31,10 @@ exclude = [
 
 
 [features]
-default = []
+default = ["cuda"]
 
 benchmark = ["burn/autotune", "burn/fusion"]
+cuda = ["burn/cuda", "burn-cuda"]
 
 
 [dependencies]
@@ -58,6 +59,7 @@ features = [
   # "vulkan",
   # "webgpu",
   "wgpu",
+  "cuda",
 ]
 
 [dependencies.burn-wgpu]
@@ -74,7 +76,7 @@ version = "0.6"
 default-features = true
 features = [
   # "autotune-checks",
-#   "linalg",
+  # "linalg",
   "std",
   # "template",
   # "wgpu",
@@ -91,6 +93,15 @@ features = [
   # "channel-mutex",
   "std",
   # "storage-bytes",
+]
+
+[dependencies.burn-cuda]
+version = "0.18"
+optional = true
+default-features = false
+features = [
+  "fusion",
+  "std",
 ]
 
 
