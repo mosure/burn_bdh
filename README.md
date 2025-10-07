@@ -36,6 +36,9 @@ burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2
 
 - `cargo bench`
 - open `target/criterion/report/index.html`
+- The inference benchmark automatically skips scenarios that would exceed the
+  ~1 GiB storage-buffer limit of the default wgpu runtime; lower the batch size,
+  context length, or MLP multiplier if you need those larger cases.
 
 
 ## compatible burn versions

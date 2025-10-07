@@ -13,6 +13,9 @@ struct InferenceConfig {
     block: usize,
 }
 
+const STORAGE_BUFFER_LIMIT_BYTES: u64 = 1 << 30; // 1 GiB, wgpu storage buffer cap on most drivers
+const FLOAT_BYTES: u64 = std::mem::size_of::<f32>() as u64;
+
 const INFERENCE_CONFIGS: &[InferenceConfig] = &[
     InferenceConfig {
         name: "b8_t128",
@@ -40,6 +43,21 @@ fn inference_bench(c: &mut Criterion) {
     let model_config = BDHConfig::default();
 
     for cfg in INFERENCE_CONFIGS {
+        let estimated_bytes = estimated_query_tensor_bytes(&model_config, cfg);
+        if estimated_bytes > STORAGE_BUFFER_LIMIT_BYTES as u128 {
+            log_theoretical_profile(&model_config, cfg);
+            let requested_gib = estimated_bytes as f64 / (1024.0_f64 * 1024.0_f64 * 1024.0_f64);
+            let limit_gib =
+                STORAGE_BUFFER_LIMIT_BYTES as f64 / (1024.0_f64 * 1024.0_f64 * 1024.0_f64);
+            println!(
+                "[inference:{name}] skipping: query tensor needs {requested_gib:.2} GiB, \
+                 wgpu storage buffers support up to {limit_gib:.2} GiB. \
+                 Reduce batch/sequence length or the MLP multiplier to run this case.",
+                name = cfg.name
+            );
+            continue;
+        }
+
         let model = BDH::<Backend>::new(model_config.clone(), &device);
         let token_count = cfg.batch * cfg.block;
         let tokens: Vec<i64> = (0..token_count).map(|idx| (idx % 255) as i64).collect();
@@ -101,3 +119,12 @@ fn compute_latent_total(config: &BDHConfig) -> usize {
 
 criterion_group!(benches, inference_bench);
 criterion_main!(benches);
+
+fn estimated_query_tensor_bytes(config: &BDHConfig, cfg: &InferenceConfig) -> u128 {
+    let batch = cfg.batch as u128;
+    let time = cfg.block as u128;
+    let heads = config.n_head as u128;
+    let latent_per_head = compute_latent_per_head(config) as u128;
+
+    batch * heads * time * latent_per_head * (FLOAT_BYTES as u128)
+}
