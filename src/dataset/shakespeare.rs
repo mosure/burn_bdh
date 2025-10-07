@@ -88,7 +88,7 @@ impl ShakespeareDataset {
         if tokens_per_step == 0 {
             return 1;
         }
-        let steps = (span + tokens_per_step - 1) / tokens_per_step;
+        let steps = span.div_ceil(tokens_per_step);
         steps.max(1)
     }
 

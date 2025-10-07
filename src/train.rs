@@ -141,7 +141,7 @@ fn run() -> Result<()> {
             &config,
             Arc::clone(&dataset),
             "wgpu",
-            |device| init_runtime(device),
+            init_runtime,
         ),
         BackendArg::Cuda => {
             #[cfg(feature = "cuda")]
@@ -180,7 +180,7 @@ where
 
     let steps_per_epoch = dataset.steps_per_epoch(ShakespeareSplit::Train);
     let total_steps = training.max_iters.max(1);
-    let total_epochs = usize::max(1, (total_steps + steps_per_epoch - 1) / steps_per_epoch);
+    let total_epochs = usize::max(1, total_steps.div_ceil(steps_per_epoch));
 
     info!(
         "train schedule: steps_per_epoch={steps_per_epoch}, total_steps={total_steps}, epochs={total_epochs}"
@@ -218,84 +218,52 @@ where
     let scheduler = resolve_lr_scheduler(optimizer_cfg, total_steps, &model_config)?;
 
     let run_dir = PathBuf::from("runs").join(backend_name);
+    let context = TrainEnvironment {
+        run_dir: &run_dir,
+        backend_name,
+        training,
+        model_config: &model_config,
+        device: &device,
+        train_loader,
+        valid_loader,
+        epochs: total_epochs,
+    };
     let model = match scheduler {
         ResolvedLrScheduler::Constant(lr) => train_with_scheduler(
-            &run_dir,
-            backend_name,
-            training,
-            &model_config,
-            &device,
+            &context,
             model.take().expect("model initialized"),
             optim.take().expect("optimizer initialized"),
             lr,
-            Arc::clone(&train_loader),
-            Arc::clone(&valid_loader),
-            total_epochs,
         )?,
         ResolvedLrScheduler::Cosine(scheduler) => train_with_scheduler(
-            &run_dir,
-            backend_name,
-            training,
-            &model_config,
-            &device,
+            &context,
             model.take().expect("model initialized"),
             optim.take().expect("optimizer initialized"),
             scheduler,
-            Arc::clone(&train_loader),
-            Arc::clone(&valid_loader),
-            total_epochs,
         )?,
         ResolvedLrScheduler::Linear(scheduler) => train_with_scheduler(
-            &run_dir,
-            backend_name,
-            training,
-            &model_config,
-            &device,
+            &context,
             model.take().expect("model initialized"),
             optim.take().expect("optimizer initialized"),
             scheduler,
-            Arc::clone(&train_loader),
-            Arc::clone(&valid_loader),
-            total_epochs,
         )?,
         ResolvedLrScheduler::Exponential(scheduler) => train_with_scheduler(
-            &run_dir,
-            backend_name,
-            training,
-            &model_config,
-            &device,
+            &context,
             model.take().expect("model initialized"),
             optim.take().expect("optimizer initialized"),
             scheduler,
-            Arc::clone(&train_loader),
-            Arc::clone(&valid_loader),
-            total_epochs,
         )?,
         ResolvedLrScheduler::Step(scheduler) => train_with_scheduler(
-            &run_dir,
-            backend_name,
-            training,
-            &model_config,
-            &device,
+            &context,
             model.take().expect("model initialized"),
             optim.take().expect("optimizer initialized"),
             scheduler,
-            Arc::clone(&train_loader),
-            Arc::clone(&valid_loader),
-            total_epochs,
         )?,
         ResolvedLrScheduler::Noam(scheduler) => train_with_scheduler(
-            &run_dir,
-            backend_name,
-            training,
-            &model_config,
-            &device,
+            &context,
             model.take().expect("model initialized"),
             optim.take().expect("optimizer initialized"),
             scheduler,
-            Arc::clone(&train_loader),
-            Arc::clone(&valid_loader),
-            total_epochs,
         )?,
     };
 
@@ -320,29 +288,37 @@ enum ResolvedLrScheduler {
     Noam(NoamLrScheduler),
 }
 
-fn train_with_scheduler<B, S>(
-    run_dir: &Path,
-    backend_name: &str,
-    training: &TrainingHyperparameters,
-    model_config: &BDHConfig,
-    device: &B::Device,
-    model: BDH<B>,
-    optimizer: OptimizerAdaptor<AdamW, BDH<B>, B>,
-    scheduler: S,
+struct TrainEnvironment<'a, B>
+where
+    B: AutodiffBackend + Clone + 'static,
+    B::Device: Clone,
+{
+    run_dir: &'a Path,
+    backend_name: &'a str,
+    training: &'a TrainingHyperparameters,
+    model_config: &'a BDHConfig,
+    device: &'a B::Device,
     train_loader: Arc<dyn DataLoader<B, ShakespeareBatch<B>>>,
     valid_loader: Arc<dyn DataLoader<ValidBackend<B>, ShakespeareBatch<ValidBackend<B>>>>,
     epochs: usize,
+}
+
+fn train_with_scheduler<B, S>(
+    env: &TrainEnvironment<'_, B>,
+    model: BDH<B>,
+    optimizer: OptimizerAdaptor<AdamW, BDH<B>, B>,
+    scheduler: S,
 ) -> Result<BDH<B>>
 where
     B: AutodiffBackend + Clone + 'static,
     B::Device: Clone,
     S: LrScheduler + 'static,
 {
-    fs::create_dir_all(run_dir)?;
+    fs::create_dir_all(env.run_dir)?;
 
-    let builder = LearnerBuilder::new(run_dir)
-        .num_epochs(epochs)
-        .devices(vec![device.clone()])
+    let builder = LearnerBuilder::new(env.run_dir)
+        .num_epochs(env.epochs)
+        .devices(vec![env.device.clone()])
         .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
         .metric_train_numeric(LossMetric::<ValidBackend<B>>::new())
         .metric_valid_numeric(LossMetric::<ValidBackend<B>>::new())
@@ -352,13 +328,13 @@ where
     let learner = builder.build(model, optimizer, scheduler);
 
     log_theoretical_profile(
-        model_config,
-        training.batch_size,
-        training.block_size,
-        backend_name,
+        env.model_config,
+        env.training.batch_size,
+        env.training.block_size,
+        env.backend_name,
     );
 
-    Ok(learner.fit(train_loader, valid_loader))
+    Ok(learner.fit(Arc::clone(&env.train_loader), Arc::clone(&env.valid_loader)))
 }
 
 fn resolve_lr_scheduler(

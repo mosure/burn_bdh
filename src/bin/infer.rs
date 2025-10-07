@@ -32,9 +32,7 @@ fn run() -> Result<()> {
     let config = load_training_config(&config_paths)?;
 
     match args.backend {
-        BackendArg::Wgpu => {
-            infer_backend::<Wgpu<f32>, _>(&config, &args, "wgpu", |device| init_runtime(device))
-        }
+        BackendArg::Wgpu => infer_backend::<Wgpu<f32>, _>(&config, &args, "wgpu", init_runtime),
         BackendArg::Cuda => {
             #[cfg(feature = "cuda")]
             {
