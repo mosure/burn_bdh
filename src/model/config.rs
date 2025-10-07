@@ -116,6 +116,7 @@ pub struct BDHConfig {
     pub dropout: f64,
     pub n_head: usize,
     pub mlp_internal_dim_multiplier: usize,
+    pub n_expert: usize,
     pub vocab_size: usize,
     pub fused_kernels: FusedKernelConfig,
 }
@@ -128,6 +129,7 @@ impl Default for BDHConfig {
             dropout: 0.1,
             n_head: 4,
             mlp_internal_dim_multiplier: 128,
+            n_expert: 1,
             vocab_size: 256,
             fused_kernels: FusedKernelConfig::default(),
         }
@@ -135,11 +137,27 @@ impl Default for BDHConfig {
 }
 
 impl BDHConfig {
-    pub(crate) fn latent_per_head(&self) -> usize {
-        (self.mlp_internal_dim_multiplier * self.n_embd) / self.n_head
+    pub fn latent_per_head(&self) -> usize {
+        let total = self.mlp_internal_dim_multiplier * self.n_embd;
+        assert!(
+            total % self.n_head == 0,
+            "latent size must be divisible by the number of heads"
+        );
+        let latent_per_head = total / self.n_head;
+        assert!(
+            latent_per_head % self.n_expert == 0,
+            "latent per head {} must be divisible by experts {}",
+            latent_per_head,
+            self.n_expert
+        );
+        latent_per_head
     }
 
-    pub(crate) fn latent_total(&self) -> usize {
+    pub fn latent_total(&self) -> usize {
         self.latent_per_head() * self.n_head
+    }
+
+    pub fn latent_per_expert(&self) -> usize {
+        self.latent_per_head() / self.n_expert
     }
 }

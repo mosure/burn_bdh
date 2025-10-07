@@ -2,6 +2,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use burn::data::dataloader::{DataLoader, DataLoaderIterator, Progress};
 use burn::tensor::backend::Backend;
@@ -67,12 +68,8 @@ impl ShakespeareDataset {
         })
     }
 
-    pub fn sample_batch<B: Backend>(
-        &self,
-        split: ShakespeareSplit,
-        device: &B::Device,
-    ) -> (Tensor<B, 2, Int>, Tensor<B, 2, Int>) {
-        let (offset, span) = match split {
+    fn split_offset_and_span(&self, split: ShakespeareSplit) -> (usize, usize) {
+        match split {
             ShakespeareSplit::Train => (0, self.train_len),
             ShakespeareSplit::Val => {
                 let remaining = self.data.len().saturating_sub(self.train_len);
@@ -82,7 +79,25 @@ impl ShakespeareDataset {
                     (self.train_len, remaining)
                 }
             }
-        };
+        }
+    }
+
+    pub fn steps_per_epoch(&self, split: ShakespeareSplit) -> usize {
+        let (_offset, span) = self.split_offset_and_span(split);
+        let tokens_per_step = self.block_size * self.batch_size;
+        if tokens_per_step == 0 {
+            return 1;
+        }
+        let steps = (span + tokens_per_step - 1) / tokens_per_step;
+        steps.max(1)
+    }
+
+    pub fn sample_batch<B: Backend>(
+        &self,
+        split: ShakespeareSplit,
+        device: &B::Device,
+    ) -> (Tensor<B, 2, Int>, Tensor<B, 2, Int>) {
+        let (offset, span) = self.split_offset_and_span(split);
 
         let mut rng = thread_rng();
         let mut inputs = vec![0i64; self.batch_size * self.block_size];
@@ -141,12 +156,26 @@ impl<B: Backend> ShakespeareBatch<B> {
     }
 }
 
-#[derive(Clone)]
 pub struct ShakespeareRandomDataLoader<B: Backend> {
     dataset: Arc<ShakespeareDataset>,
     split: ShakespeareSplit,
     device: B::Device,
     steps_per_epoch: usize,
+    total_steps: Option<usize>,
+    consumed_steps: Option<Arc<AtomicUsize>>,
+}
+
+impl<B: Backend> Clone for ShakespeareRandomDataLoader<B> {
+    fn clone(&self) -> Self {
+        Self {
+            dataset: Arc::clone(&self.dataset),
+            split: self.split,
+            device: self.device.clone(),
+            steps_per_epoch: self.steps_per_epoch,
+            total_steps: self.total_steps,
+            consumed_steps: self.consumed_steps.as_ref().map(Arc::clone),
+        }
+    }
 }
 
 impl<B: Backend> ShakespeareRandomDataLoader<B> {
@@ -155,12 +184,19 @@ impl<B: Backend> ShakespeareRandomDataLoader<B> {
         split: ShakespeareSplit,
         device: &B::Device,
         steps_per_epoch: usize,
+        total_steps: Option<usize>,
     ) -> Self {
+        let steps_per_epoch = steps_per_epoch.max(1);
+        let total_steps = total_steps.filter(|value| *value > 0);
+        let consumed_steps = total_steps.as_ref().map(|_| Arc::new(AtomicUsize::new(0)));
+
         Self {
             dataset,
             split,
             device: device.clone(),
-            steps_per_epoch: steps_per_epoch.max(1),
+            steps_per_epoch,
+            total_steps,
+            consumed_steps,
         }
     }
 }
@@ -171,12 +207,26 @@ where
     B::Device: Clone,
 {
     fn iter<'a>(&'a self) -> Box<dyn DataLoaderIterator<ShakespeareBatch<B>> + 'a> {
+        let steps_total =
+            if let (Some(limit), Some(consumed)) = (self.total_steps, &self.consumed_steps) {
+                let used = consumed.load(Ordering::Relaxed);
+                if used >= limit {
+                    0
+                } else {
+                    (limit - used).min(self.steps_per_epoch)
+                }
+            } else {
+                self.steps_per_epoch
+            };
+
         Box::new(ShakespeareRandomIterator {
             dataset: Arc::clone(&self.dataset),
             split: self.split,
             device: self.device.clone(),
-            steps_total: self.steps_per_epoch,
+            steps_total,
             step: 0,
+            total_steps: self.total_steps,
+            consumed_steps: self.consumed_steps.clone(),
         })
     }
 
@@ -190,6 +240,8 @@ where
             split: self.split,
             device: device.clone(),
             steps_per_epoch: self.steps_per_epoch,
+            total_steps: self.total_steps,
+            consumed_steps: self.consumed_steps.as_ref().map(Arc::clone),
         })
     }
 
@@ -203,6 +255,8 @@ where
             split: self.split,
             device: self.device.clone(),
             steps_per_epoch: steps,
+            total_steps: self.total_steps,
+            consumed_steps: self.consumed_steps.as_ref().map(Arc::clone),
         })
     }
 }
@@ -213,6 +267,8 @@ struct ShakespeareRandomIterator<B: Backend> {
     device: B::Device,
     steps_total: usize,
     step: usize,
+    total_steps: Option<usize>,
+    consumed_steps: Option<Arc<AtomicUsize>>,
 }
 
 impl<B: Backend> Iterator for ShakespeareRandomIterator<B> {
@@ -223,6 +279,17 @@ impl<B: Backend> Iterator for ShakespeareRandomIterator<B> {
             return None;
         }
         self.step += 1;
+
+        if let Some(counter) = &self.consumed_steps {
+            if let Some(limit) = self.total_steps {
+                let previous = counter.fetch_add(1, Ordering::Relaxed);
+                if previous >= limit {
+                    return None;
+                }
+            } else {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }
 
         let (inputs, targets) = self.dataset.sample_batch::<B>(self.split, &self.device);
 

@@ -178,16 +178,26 @@ where
 
     let model_config = build_model_config(&config.model);
 
-    let train_steps = training.max_iters.max(1);
-    let valid_steps = usize::max(1, training.max_iters / training.log_frequency.max(1));
+    let steps_per_epoch = dataset.steps_per_epoch(ShakespeareSplit::Train);
+    let total_steps = training.max_iters.max(1);
+    let total_epochs = usize::max(1, (total_steps + steps_per_epoch - 1) / steps_per_epoch);
+
+    info!(
+        "train schedule: steps_per_epoch={steps_per_epoch}, total_steps={total_steps}, epochs={total_epochs}"
+    );
 
     let train_loader: Arc<dyn DataLoader<B, ShakespeareBatch<B>>> =
         Arc::new(ShakespeareRandomDataLoader::<B>::new(
             Arc::clone(&dataset),
             ShakespeareSplit::Train,
             &device,
-            train_steps,
+            steps_per_epoch,
+            Some(total_steps),
         ));
+
+    let val_steps_per_epoch = dataset.steps_per_epoch(ShakespeareSplit::Val);
+    let desired_valid_steps = usize::max(1, total_steps / training.log_frequency.max(1));
+    let valid_steps = desired_valid_steps.min(val_steps_per_epoch).max(1);
 
     let valid_device = device.clone();
     let valid_loader: Arc<dyn DataLoader<ValidBackend<B>, ShakespeareBatch<ValidBackend<B>>>> =
@@ -196,6 +206,7 @@ where
             ShakespeareSplit::Val,
             &valid_device,
             valid_steps,
+            None,
         ));
 
     let mut model = Some(BDH::<B>::new(model_config.clone(), &device));
@@ -204,7 +215,7 @@ where
             .with_weight_decay(optimizer_cfg.weight_decay)
             .init::<B, BDH<B>>(),
     );
-    let scheduler = resolve_lr_scheduler(optimizer_cfg, training, &model_config)?;
+    let scheduler = resolve_lr_scheduler(optimizer_cfg, total_steps, &model_config)?;
 
     let run_dir = PathBuf::from("runs").join(backend_name);
     let model = match scheduler {
@@ -219,6 +230,7 @@ where
             lr,
             Arc::clone(&train_loader),
             Arc::clone(&valid_loader),
+            total_epochs,
         )?,
         ResolvedLrScheduler::Cosine(scheduler) => train_with_scheduler(
             &run_dir,
@@ -231,6 +243,7 @@ where
             scheduler,
             Arc::clone(&train_loader),
             Arc::clone(&valid_loader),
+            total_epochs,
         )?,
         ResolvedLrScheduler::Linear(scheduler) => train_with_scheduler(
             &run_dir,
@@ -243,6 +256,7 @@ where
             scheduler,
             Arc::clone(&train_loader),
             Arc::clone(&valid_loader),
+            total_epochs,
         )?,
         ResolvedLrScheduler::Exponential(scheduler) => train_with_scheduler(
             &run_dir,
@@ -255,6 +269,7 @@ where
             scheduler,
             Arc::clone(&train_loader),
             Arc::clone(&valid_loader),
+            total_epochs,
         )?,
         ResolvedLrScheduler::Step(scheduler) => train_with_scheduler(
             &run_dir,
@@ -267,6 +282,7 @@ where
             scheduler,
             Arc::clone(&train_loader),
             Arc::clone(&valid_loader),
+            total_epochs,
         )?,
         ResolvedLrScheduler::Noam(scheduler) => train_with_scheduler(
             &run_dir,
@@ -279,6 +295,7 @@ where
             scheduler,
             Arc::clone(&train_loader),
             Arc::clone(&valid_loader),
+            total_epochs,
         )?,
     };
 
@@ -314,6 +331,7 @@ fn train_with_scheduler<B, S>(
     scheduler: S,
     train_loader: Arc<dyn DataLoader<B, ShakespeareBatch<B>>>,
     valid_loader: Arc<dyn DataLoader<ValidBackend<B>, ShakespeareBatch<ValidBackend<B>>>>,
+    epochs: usize,
 ) -> Result<BDH<B>>
 where
     B: AutodiffBackend + Clone + 'static,
@@ -323,7 +341,7 @@ where
     fs::create_dir_all(run_dir)?;
 
     let builder = LearnerBuilder::new(run_dir)
-        .num_epochs(1)
+        .num_epochs(epochs)
         .devices(vec![device.clone()])
         .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
         .metric_train_numeric(LossMetric::<ValidBackend<B>>::new())
@@ -345,11 +363,11 @@ where
 
 fn resolve_lr_scheduler(
     optimizer_cfg: &OptimizerConfig,
-    training: &TrainingHyperparameters,
+    total_steps: usize,
     model_config: &BDHConfig,
 ) -> Result<ResolvedLrScheduler> {
     let base_lr = optimizer_cfg.learning_rate;
-    let fallback_iters = training.max_iters.max(1);
+    let fallback_iters = total_steps.max(1);
 
     let schedule = match &optimizer_cfg.lr_schedule {
         None => ResolvedLrScheduler::Constant(base_lr),
@@ -478,9 +496,8 @@ fn log_theoretical_profile(config: &BDHConfig, batch: usize, block: usize, backe
     let batch = batch as u64;
     let time = block as u64;
     let embed = config.n_embd as u64;
-    let latent_per_head =
-        (config.mlp_internal_dim_multiplier * config.n_embd / config.n_head) as u64;
-    let latent_total = latent_per_head * config.n_head as u64;
+    let latent_per_head = config.latent_per_head() as u64;
+    let latent_total = config.latent_total() as u64;
     let heads = config.n_head as u64;
     let bt = batch * time;
 
