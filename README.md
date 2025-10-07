@@ -14,6 +14,7 @@ burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2
 
 ## features
 
+- [x] cached inference
 - [x] training benchmarks and reporting
 - [ ] adaptive tool discovery
 - [ ] conditional (deep) gating

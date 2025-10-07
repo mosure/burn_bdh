@@ -20,7 +20,7 @@ use burn::lr_scheduler::{
 use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{AdamW, AdamWConfig};
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
-use burn::tensor::{Int, Tensor, TensorData};
+use burn::tensor::Tensor;
 use burn_autodiff::Autodiff;
 use burn_train::metric::{Adaptor, ItemLazy, LearningRateMetric, LossInput, LossMetric};
 use burn_train::{LearnerBuilder, TrainOutput, TrainStep, ValidStep};
@@ -34,7 +34,7 @@ use burn::record::{BinFileRecorder, FullPrecisionSettings};
 
 use burn_dragon_hatchling::wgpu::init_runtime;
 use burn_dragon_hatchling::{
-    BDH, BDHConfig, DatasetConfig, GenerationConfig, LearningRateScheduleConfig, ModelOverrides,
+    generate_text, BDH, BDHConfig, DatasetConfig, LearningRateScheduleConfig, ModelOverrides,
     OptimizerConfig, ShakespeareBatch, ShakespeareDataset, ShakespeareRandomDataLoader,
     ShakespeareSplit, TrainingConfig, TrainingHyperparameters, language_model_loss,
     load_training_config,
@@ -289,13 +289,15 @@ where
     };
 
     info!("Training complete on {backend_name}. Generating sample...");
-    generate_sample::<B>(
+    let sample_tokenizer = dataset.tokenizer();
+    let sample = generate_text::<B>(
         &model,
-        dataset.as_ref(),
+        sample_tokenizer.as_ref(),
         &device,
-        training.block_size,
+        &config.training,
         &config.generation,
     )?;
+    println!("{sample}");
 
     Ok(())
 }
@@ -554,40 +556,4 @@ fn log_theoretical_profile(config: &BDHConfig, batch: usize, block: usize, backe
         value = attn_value as f64 / 1e9,
         dec = decoder_matmul as f64 / 1e9,
     );
-}
-
-fn generate_sample<B: BackendTrait>(
-    model: &BDH<B>,
-    dataset: &ShakespeareDataset,
-    device: &B::Device,
-    block_size: usize,
-    generation: &GenerationConfig,
-) -> Result<()> {
-    let tokenizer = dataset.tokenizer();
-    let mut prompt_tokens: Vec<i64> = tokenizer
-        .encode(&generation.prompt, false, false)
-        .into_iter()
-        .map(|id| id as i64)
-        .collect();
-    if prompt_tokens.len() > block_size {
-        prompt_tokens = prompt_tokens[prompt_tokens.len() - block_size..].to_vec();
-    }
-    let prompt_len = prompt_tokens.len();
-    let prompt =
-        Tensor::<B, 2, Int>::from_data(TensorData::new(prompt_tokens, [1, prompt_len]), device);
-
-    let generated = model.generate(
-        prompt,
-        generation.max_tokens,
-        generation.temperature,
-        generation.top_k,
-    );
-    let generated_tokens = generated
-        .into_data()
-        .convert::<i64>()
-        .into_vec::<i64>()
-        .map_err(|err| anyhow!("{err:?}"))?;
-    let text = dataset.decode(&generated_tokens);
-    println!("{text}");
-    Ok(())
 }

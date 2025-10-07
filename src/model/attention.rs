@@ -7,6 +7,23 @@ use burn::tensor::{Int, Tensor};
 use super::config::FusedKernelConfig;
 use crate::kernel::{BlockPattern2d, linear_attention};
 
+#[derive(Default, Debug, Clone)]
+pub struct AttentionCache<B: Backend> {
+    q_rot: Option<Tensor<B, 4>>,
+    value: Option<Tensor<B, 4>>,
+    position: usize,
+}
+
+impl<B: Backend> AttentionCache<B> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn position(&self) -> usize {
+        self.position
+    }
+}
+
 #[derive(Module, Debug)]
 pub struct Attention<B: Backend> {
     freqs: Tensor<B, 4>,
@@ -56,21 +73,108 @@ impl<B: Backend> Attention<B> {
             );
         }
 
-        let [_batch, _heads, time, _dim] = query.shape().dims();
-        let device = self.freqs.device();
-        let positions = Tensor::<B, 1, Int>::arange(0..time as i64, &device)
-            .float()
-            .reshape([1, 1, time, 1]);
 
-        let raw = positions * self.freqs.clone();
-        let phases = (raw.clone() - raw.floor()) * (2.0 * PI);
-        let q_rot = self.rope(phases.clone(), query);
+        let q_rot = self.rotate(query, 0);
         let k_rot = q_rot.clone();
 
         let scores = q_rot.matmul(k_rot.swap_dims(2, 3)).tril(-1);
         let value = value.repeat_dim(1, self.n_head);
 
         scores.matmul(value)
+    }
+
+    pub fn forward_cached(
+        &self,
+        query: Tensor<B, 4>,
+        value: Tensor<B, 4>,
+        cache: &mut AttentionCache<B>,
+    ) -> Tensor<B, 4> {
+        let time_new = query.shape().dims::<4>()[2];
+
+        let q_rot = self.rotate(query, cache.position);
+        let k_rot = q_rot.clone();
+        let value_rep = value.repeat_dim(1, self.n_head);
+
+        let context = if let (Some(prev_q), Some(prev_v)) = (&cache.q_rot, &cache.value) {
+            let scores_prev = q_rot.clone().matmul(prev_q.clone().swap_dims(2, 3));
+            let mut scores_self = q_rot
+                .clone()
+                .matmul(k_rot.clone().swap_dims(2, 3))
+                .tril(-1);
+
+            let scores_prev = if self.use_alibi {
+                let device = q_rot.device();
+                let slopes = self.alibi_slopes.clone().reshape([1, self.n_head, 1, 1]);
+                let prev_len = cache.position;
+
+                let pos_row = Tensor::<B, 1, Int>::arange(
+                    cache.position as i64..(cache.position + time_new) as i64,
+                    &device,
+                )
+                .float()
+                .reshape([1, 1, time_new, 1]);
+
+                let pos_prev = Tensor::<B, 1, Int>::arange(0..prev_len as i64, &device)
+                    .float()
+                    .reshape([1, 1, 1, prev_len]);
+                let alibi_prev = slopes.clone() * (pos_prev - pos_row.clone());
+
+                let pos_new = Tensor::<B, 1, Int>::arange(
+                    cache.position as i64..(cache.position + time_new) as i64,
+                    &device,
+                )
+                .float()
+                .reshape([1, 1, 1, time_new]);
+                let alibi_self = slopes * (pos_new - pos_row).tril(-1);
+
+                scores_self = scores_self + alibi_self;
+                scores_prev + alibi_prev
+            } else {
+                scores_prev
+            };
+
+            let scores = Tensor::cat(vec![scores_prev, scores_self], 3);
+            let value_all = Tensor::cat(vec![prev_v.clone(), value_rep.clone()], 2);
+            scores.matmul(value_all)
+        } else {
+            let mut scores = q_rot
+                .clone()
+                .matmul(k_rot.clone().swap_dims(2, 3))
+                .tril(-1);
+            if self.use_alibi {
+                let device = q_rot.device();
+                let slopes = self.alibi_slopes.clone().reshape([1, self.n_head, 1, 1]);
+                let pos_row = Tensor::<B, 1, Int>::arange(
+                    cache.position as i64..(cache.position + time_new) as i64,
+                    &device,
+                )
+                .float()
+                .reshape([1, 1, time_new, 1]);
+                let pos_new = Tensor::<B, 1, Int>::arange(
+                    cache.position as i64..(cache.position + time_new) as i64,
+                    &device,
+                )
+                .float()
+                .reshape([1, 1, 1, time_new]);
+                let alibi = slopes * (pos_new - pos_row).tril(-1);
+                scores = scores + alibi;
+            }
+            scores.matmul(value_rep.clone())
+        };
+
+        cache.q_rot = Some(if let Some(prev) = cache.q_rot.take() {
+            Tensor::cat(vec![prev, k_rot.clone()], 2)
+        } else {
+            k_rot.clone()
+        });
+        cache.value = Some(if let Some(prev) = cache.value.take() {
+            Tensor::cat(vec![prev, value_rep.clone()], 2)
+        } else {
+            value_rep.clone()
+        });
+        cache.position += time_new;
+
+        context
     }
 
     fn rope(&self, phases: Tensor<B, 4>, values: Tensor<B, 4>) -> Tensor<B, 4> {
@@ -86,6 +190,21 @@ impl<B: Backend> Attention<B> {
         let rotated = Tensor::stack::<5>(vec![odd.clone().neg(), even], 4).reshape([b, h, t, n]);
 
         values * cos + rotated * sin
+    }
+
+    fn rotate(&self, values: Tensor<B, 4>, start: usize) -> Tensor<B, 4> {
+        let time = values.shape().dims::<4>()[2];
+        let device = values.device();
+        let positions = Tensor::<B, 1, Int>::arange(
+            start as i64..(start + time) as i64,
+            &device,
+        )
+        .float()
+        .reshape([1, 1, time, 1]);
+
+        let raw = positions * self.freqs.clone();
+        let phases = (raw.clone() - raw.floor()) * (2.0 * PI);
+        self.rope(phases, values)
     }
 
     fn build_freqs(latent: usize, theta: f32, device: &B::Device) -> Tensor<B, 4> {

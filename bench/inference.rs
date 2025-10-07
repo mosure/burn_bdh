@@ -1,10 +1,11 @@
 #![recursion_limit = "512"]
 
 use burn::tensor::backend::Backend as BackendTrait;
-use burn::tensor::{Int, Tensor, TensorData};
-use burn_dragon_hatchling::{BDH, BDHConfig, wgpu::init_runtime};
+use burn_dragon_hatchling::{
+    prefill_state, sample_next_token, BDH, BDHConfig, wgpu::init_runtime,
+};
 use burn_wgpu::Wgpu;
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{black_box, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 #[cfg(feature = "cuda")]
 use burn_cuda::Cuda;
@@ -78,22 +79,46 @@ fn run_inference_backend<B, Init, Skip>(
         }
 
         let model = BDH::<B>::new(model_config.clone(), &device);
-        let token_count = cfg.batch * cfg.block;
-        let tokens: Vec<i64> = (0..token_count).map(|idx| (idx % 255) as i64).collect();
-        let input = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(tokens, [cfg.batch, cfg.block]),
-            &device,
-        );
+        let prompt_tokens: Vec<i64> = (0..cfg.block).map(|idx| (idx % 255) as i64).collect();
+        let (base_state, base_logits) =
+            prefill_state(&model, &prompt_tokens, &device).expect("prefill state");
 
         // Warm-up ensures shader compilation / graph construction is amortized.
-        let _ = model.forward(input.clone()).into_data();
+        let mut warm_state = base_state.clone();
+        let mut warm_logits = base_logits.clone();
+        for _ in 0..cfg.batch {
+            let (_, next_logits) = sample_next_token(
+                &model,
+                &mut warm_state,
+                warm_logits,
+                1.0,
+                None,
+                &device,
+            )
+            .expect("warm-up token");
+            warm_logits = next_logits;
+        }
 
         log_theoretical_profile(&model_config, cfg);
 
-        group.throughput(Throughput::Elements(token_count as u64));
+        group.throughput(Throughput::Elements(cfg.batch as u64));
         group.bench_with_input(BenchmarkId::from_parameter(cfg.name), cfg, |b, _| {
             b.iter(|| {
-                let _ = model.forward(input.clone()).into_data();
+                let mut state = base_state.clone();
+                let mut logits = base_logits.clone();
+                for _ in 0..cfg.batch {
+                    let (token, next_logits) = sample_next_token(
+                        &model,
+                        &mut state,
+                        logits,
+                        1.0,
+                        None,
+                        &device,
+                    )
+                    .expect("sample token");
+                    logits = next_logits;
+                    black_box(token);
+                }
             });
         });
     }

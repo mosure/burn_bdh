@@ -10,6 +10,7 @@ use crate::kernel::{BlockPattern1d, relu_lowrank};
 
 use super::attention::Attention;
 use super::config::{BDHConfig, FusedKernelConfig};
+use super::state::ModelState;
 
 const LAYER_NORM_EPS: f32 = 1e-5;
 
@@ -159,16 +160,20 @@ impl<B: Backend> BDH<B> {
         temperature: f32,
         top_k: Option<usize>,
     ) -> Tensor<B, 2, Int> {
+        let [batch, _] = indices.shape().dims();
+        assert_eq!(batch, 1, "generation currently supports batch size 1");
+
+        let mut state = self.init_state();
+        let mut logits = self.forward_with_state(indices.clone(), &mut state);
+        let [_, mut time, vocab] = logits.shape().dims();
+        assert_eq!(time, indices.shape().dims::<2>()[1]);
+
+        let mut last_logits = logits
+            .slice_dim(1, (time - 1)..time)
+            .reshape([vocab])
+            .div_scalar(temperature);
+
         for _ in 0..max_new_tokens {
-            let logits = self.forward(indices.clone());
-            let [batch, time, vocab] = logits.shape().dims();
-            assert_eq!(batch, 1, "generation currently supports batch size 1");
-
-            let last_logits = logits
-                .slice_dim(1, (time - 1)..time)
-                .reshape([vocab])
-                .div_scalar(temperature);
-
             let mut logits_values = last_logits
                 .clone()
                 .to_data()
@@ -218,9 +223,100 @@ impl<B: Backend> BDH<B> {
                 TensorData::new(vec![next], [1, 1]),
                 &indices.device(),
             );
-            indices = Tensor::cat(vec![indices, next_token], 1);
+            indices = Tensor::cat(vec![indices, next_token.clone()], 1);
+
+            logits = self.forward_with_state(next_token, &mut state);
+            let [_, new_time, _] = logits.shape().dims();
+            time = new_time;
+            last_logits = logits
+                .slice_dim(1, (time - 1)..time)
+                .reshape([vocab])
+                .div_scalar(temperature);
         }
 
         indices
+    }
+
+    pub fn init_state(&self) -> ModelState<B> {
+        ModelState::new(self.n_layer)
+    }
+
+    pub fn forward_with_state(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        state: &mut ModelState<B>,
+    ) -> Tensor<B, 3> {
+        assert_eq!(state.layers.len(), self.n_layer, "model state layers mismatch");
+        let mut current = self.embed.forward(tokens).unsqueeze_dim::<4>(1);
+        current = self.layer_norm(current);
+
+        let encoder = self.encoder.val().unsqueeze_dim::<4>(0);
+        let encoder_v = self.encoder_v.val().unsqueeze_dim::<4>(0);
+        let decoder = self.decoder.val();
+        let fused = self.kernel.enabled;
+        let latent_pattern: &BlockPattern1d = &self.kernel.block_sparse.latent;
+
+        for layer_state in &mut state.layers {
+            let x_sparse = if fused {
+                relu_lowrank::fused_forward(
+                    current.clone(),
+                    encoder.clone(),
+                    None,
+                    self.kernel.relu_threshold,
+                    latent_pattern,
+                )
+            } else {
+                let mut x_latent = current.clone().matmul(encoder.clone());
+                if self.kernel.relu_threshold != 0.0 {
+                    x_latent = x_latent.sub_scalar(self.kernel.relu_threshold);
+                }
+                activation::relu(x_latent)
+            };
+
+            let attn = self.attention.forward_cached(
+                x_sparse.clone(),
+                current.clone(),
+                &mut layer_state.attention,
+            );
+            let attn = self.layer_norm(attn);
+
+            let y_sparse = if fused {
+                relu_lowrank::fused_forward(
+                    attn.clone(),
+                    encoder_v.clone(),
+                    None,
+                    self.kernel.relu_threshold,
+                    latent_pattern,
+                )
+            } else {
+                let mut y_latent = attn.matmul(encoder_v.clone());
+                if self.kernel.relu_threshold != 0.0 {
+                    y_latent = y_latent.sub_scalar(self.kernel.relu_threshold);
+                }
+                activation::relu(y_latent)
+            };
+
+            let xy_sparse = x_sparse * y_sparse;
+            let xy_sparse = self.dropout.forward(xy_sparse);
+
+            let mixed = xy_sparse.swap_dims(1, 2);
+            let [batch, time, heads, latent] = mixed.shape().dims();
+            let mixed_flat = mixed.reshape([batch * time, heads * latent]);
+
+            let mlp_flat = mixed_flat.matmul(decoder.clone());
+            let mlp_out = mlp_flat
+                .reshape([batch, time, self.n_embd])
+                .unsqueeze_dim::<4>(1);
+            let mlp_out = self.layer_norm(mlp_out);
+            current = self.layer_norm(current + mlp_out);
+        }
+
+        state.position += current.shape().dims::<4>()[2];
+
+        let [batch, _, time, dim] = current.shape().dims();
+        current
+            .reshape([batch * time, dim])
+            .matmul(self.lm_head.val())
+            .reshape([batch, time, self.vocab_size])
     }
 }
