@@ -113,18 +113,30 @@ pub fn generate_tokens<B: Backend>(
     max_new_tokens: usize,
     temperature: f32,
     top_k: Option<usize>,
+    context_limit: Option<usize>,
 ) -> Result<Vec<i64>> {
-    let (mut state, mut last_logits) = prefill_state(model, &prompt_tokens, device)?;
-    let mut tokens_all = prompt_tokens;
+    let mut context_tokens = prompt_tokens.clone();
+    let mut full_tokens = prompt_tokens;
+    let (mut state, mut last_logits) = prefill_state(model, &context_tokens, device)?;
 
     for _ in 0..max_new_tokens {
         let (next, logits) =
             sample_next_token(model, &mut state, last_logits, temperature, top_k, device)?;
-        tokens_all.push(next);
+        full_tokens.push(next);
+        context_tokens.push(next);
         last_logits = logits;
+
+        if let Some(limit) = context_limit {
+            if context_tokens.len() > limit {
+                context_tokens = context_tokens[context_tokens.len() - limit..].to_vec();
+                let (new_state, new_logits) = prefill_state(model, &context_tokens, device)?;
+                state = new_state;
+                last_logits = new_logits;
+            }
+        }
     }
 
-    Ok(tokens_all)
+    Ok(full_tokens)
 }
 
 pub fn generate_text<B: Backend>(
@@ -147,6 +159,7 @@ pub fn generate_text<B: Backend>(
         generation.max_tokens,
         generation.temperature,
         generation.top_k,
+        Some(training.block_size),
     )?;
 
     let decoded_ids: Vec<u32> = tokens_all
