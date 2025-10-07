@@ -28,6 +28,7 @@ exclude = [
   "assets",
   "credits",
 ]
+default-run = "train"
 
 
 [features]
