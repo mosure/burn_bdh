@@ -20,6 +20,8 @@ pub struct DatasetConfig {
 pub struct TrainingHyperparameters {
     pub block_size: usize,
     pub batch_size: usize,
+    #[serde(default)]
+    pub logical_batch_size: Option<usize>,
     pub max_iters: usize,
     pub log_frequency: usize,
     #[serde(default = "default_context_strategy")]
@@ -128,6 +130,21 @@ pub struct TrainingConfig {
     pub generation: GenerationConfig,
     #[serde(default)]
     pub model: ModelOverrides,
+}
+
+impl TrainingHyperparameters {
+    /// Logical batch size requested by the user, clamped to be at least the micro-batch size.
+    pub fn effective_logical_batch_size(&self) -> usize {
+        let physical = self.batch_size.max(1);
+        let logical = self.logical_batch_size.unwrap_or(physical).max(1);
+        logical.max(physical)
+    }
+
+    /// Number of accumulation steps required to reach the logical batch size.
+    pub fn gradient_accumulation_steps(&self) -> usize {
+        let physical = self.batch_size.max(1);
+        self.effective_logical_batch_size().div_ceil(physical)
+    }
 }
 
 pub fn load_training_config(paths: &[PathBuf]) -> Result<TrainingConfig> {
@@ -284,6 +301,7 @@ mod tests {
             TrainingHyperparameters {
                 block_size: 256,
                 batch_size: 16,
+                logical_batch_size: None,
                 max_iters: 2000,
                 log_frequency: 50,
                 context_strategy: ContextStrategyConfig::Infinite,

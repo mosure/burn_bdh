@@ -510,12 +510,12 @@ impl<B: Backend> TbpttRuntime<B> {
     }
 
     fn apply_strategy(&mut self, stream_ids: &[usize]) {
-        match self.strategy {
-            ContextStrategy::Infinite => {}
-            ContextStrategy::Sliding { window } => {
-                let limit = window.max(self.block_size).max(1);
-                self.state.trim_streams(stream_ids, limit);
-            }
+        let limit = match self.strategy {
+            ContextStrategy::Infinite => self.block_size,
+            ContextStrategy::Sliding { window } => window,
         }
+        .max(self.block_size)
+        .max(1);
+        self.state.trim_streams(stream_ids, limit);
     }
 }

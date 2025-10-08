@@ -2,5 +2,5 @@
 n_layer = 8
 n_embd = 384
 n_head = 6
-mlp_internal_dim_multiplier = 192
+mlp_internal_dim_multiplier = 128
 dropout = 0.1

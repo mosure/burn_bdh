@@ -203,11 +203,17 @@ where
     model_config.vocab_size = tokenizer.len();
 
     let steps_per_epoch = dataset.steps_per_epoch(ShakespeareSplit::Train);
-    let total_steps = training.max_iters.max(1);
-    let total_epochs = usize::max(1, total_steps.div_ceil(steps_per_epoch));
+    let grad_accumulation = training.gradient_accumulation_steps();
+    let logical_batch_size = training.effective_logical_batch_size();
+    let micro_batch_size = training.batch_size;
+    let optimizer_steps = training.max_iters.max(1);
+    let physical_steps = optimizer_steps.saturating_mul(grad_accumulation);
+    let total_epochs = usize::max(1, physical_steps.div_ceil(steps_per_epoch));
 
     info!(
-        "train schedule: steps_per_epoch={steps_per_epoch}, total_steps={total_steps}, epochs={total_epochs}"
+        "train schedule: micro_batch_size={micro_batch_size}, logical_batch_size={logical_batch_size}, \
+         grad_accumulation={grad_accumulation}, steps_per_epoch={steps_per_epoch}, \
+         optimizer_steps={optimizer_steps}, physical_steps={physical_steps}, epochs={total_epochs}"
     );
 
     let train_context = resolve_training_context(&training.context_strategy, training.block_size);
@@ -217,12 +223,12 @@ where
             ShakespeareSplit::Train,
             &device,
             steps_per_epoch,
-            Some(total_steps),
+            Some(physical_steps),
             train_context,
         ));
 
     let val_steps_per_epoch = dataset.steps_per_epoch(ShakespeareSplit::Val);
-    let desired_valid_steps = usize::max(1, total_steps / training.log_frequency.max(1));
+    let desired_valid_steps = usize::max(1, optimizer_steps / training.log_frequency.max(1));
     let valid_steps = desired_valid_steps.min(val_steps_per_epoch).max(1);
 
     let valid_device = device.clone();
@@ -243,7 +249,7 @@ where
             .with_weight_decay(optimizer_cfg.weight_decay)
             .init::<B, BDH<B>>(),
     );
-    let scheduler = resolve_lr_scheduler(optimizer_cfg, total_steps, &model_config)?;
+    let scheduler = resolve_lr_scheduler(optimizer_cfg, optimizer_steps, &model_config)?;
 
     let run_dir = PathBuf::from("runs").join(backend_name);
     let context = TrainEnvironment {
@@ -255,6 +261,8 @@ where
         train_loader,
         valid_loader,
         epochs: total_epochs,
+        grad_accumulation,
+        logical_batch_size,
     };
     let model = match scheduler {
         ResolvedLrScheduler::Constant(lr) => train_with_scheduler(
@@ -331,6 +339,8 @@ where
     train_loader: Arc<dyn DataLoader<B, ShakespeareBatch<B>>>,
     valid_loader: Arc<dyn DataLoader<ValidBackend<B>, ShakespeareBatch<ValidBackend<B>>>>,
     epochs: usize,
+    grad_accumulation: usize,
+    logical_batch_size: usize,
 }
 
 fn train_with_scheduler<B, S>(
@@ -346,7 +356,7 @@ where
 {
     fs::create_dir_all(env.run_dir)?;
 
-    let builder = LearnerBuilder::new(env.run_dir)
+    let mut builder = LearnerBuilder::new(env.run_dir)
         .num_epochs(env.epochs)
         .devices(vec![env.device.clone()])
         .with_file_checkpointer(BinFileRecorder::<FullPrecisionSettings>::new())
@@ -354,6 +364,16 @@ where
         .metric_valid_numeric(LossMetric::<ValidBackend<B>>::new())
         .metric_train_numeric(LearningRateMetric::new())
         .summary();
+
+    if env.grad_accumulation > 1 {
+        info!(
+            "applying gradient accumulation: steps={}, micro_batch_size={}, logical_batch_size={}",
+            env.grad_accumulation,
+            env.training.batch_size,
+            env.logical_batch_size,
+        );
+        builder = builder.grads_accumulation(env.grad_accumulation);
+    }
 
     let learner = builder.build(model, optimizer, scheduler);
 
