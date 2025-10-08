@@ -168,12 +168,12 @@ panic = "abort"
 path = "src/lib.rs"
 
 [[bin]]
-name = "train"
-path = "src/train.rs"
-
-[[bin]]
 name = "infer"
 path = "src/bin/infer.rs"
+
+[[bin]]
+name = "train"
+path = "src/bin/train.rs"
 
 [[bench]]
 name = "inference"

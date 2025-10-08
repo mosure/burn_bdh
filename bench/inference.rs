@@ -1,11 +1,12 @@
 #![recursion_limit = "512"]
+use std::hint::black_box;
 
 use burn::tensor::backend::Backend as BackendTrait;
 use burn_dragon_hatchling::{
     prefill_state, sample_next_token, BDH, BDHConfig, wgpu::init_runtime,
 };
 use burn_wgpu::Wgpu;
-use criterion::{black_box, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 #[cfg(feature = "cuda")]
 use burn_cuda::Cuda;

@@ -5,7 +5,7 @@
 [![crates.io](https://img.shields.io/crates/v/burn_dragon_hatchling.svg)](https://crates.io/crates/burn_dragon_hatchling)
 
 
-burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2509.26507) model
+burn inference and training of [dragon hatchling](https://arxiv.org/abs/2509.26507) model
 
 
 ![Alt text](./docs/vocab.png)
@@ -24,8 +24,10 @@ burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2
 - [ ] hierarchical, memory-aware recurrent state
 - [ ] mixture-of-expert routing
 - [ ] multi-modal architecture
+- [ ] multi-stream truncated backpropagation through time
 - [ ] neuromorphic backend
 - [ ] rl reasoning training
+- [ ] sparsity metrics and visualization
 - [ ] streaming, sparse synaptic backpropagation
 - [ ] temporal neuron dampening
 
@@ -33,6 +35,11 @@ burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2
 ## training
 
 - `cargo run --release` (defaults to the cuda backend)
+
+
+## inference
+
+- `cargo run --bin infer -- --max-tokens 2048 --streaming`
 
 
 ## benchmarks
