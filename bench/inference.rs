@@ -2,7 +2,7 @@
 
 use burn::tensor::backend::Backend as BackendTrait;
 use burn_dragon_hatchling::{
-    generate_tokens, ContextStrategy, BDH, BDHConfig, wgpu::init_runtime,
+    advance_generation, prefill_state, ContextStrategy, BDH, BDHConfig, wgpu::init_runtime,
 };
 use burn_wgpu::Wgpu;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -89,26 +89,35 @@ fn run_inference_backend<B, Init, Skip>(
                 prompt_tokens = prompt_tokens[prompt_tokens.len() - window..].to_vec();
             }
         }
+        let (base_state, base_logits) =
+            prefill_state(&model, &prompt_tokens, &device).expect("prefill state");
+
         // Warm-up ensures shader compilation / graph construction is amortized.
-        generate_tokens(
-            &model,
-            prompt_tokens.clone(),
-            &device,
-            cfg.batch,
-            1.0,
-            None,
-            BENCH_CONTEXT,
-        )
-        .expect("warm-up tokens");
+        {
+            let mut warm_state = base_state.clone();
+            let _ = advance_generation(
+                &model,
+                &mut warm_state,
+                base_logits.clone(),
+                &device,
+                cfg.batch,
+                1.0,
+                None,
+                BENCH_CONTEXT,
+            )
+            .expect("warm-up tokens");
+        }
 
         log_theoretical_profile(&model_config, cfg);
 
         group.throughput(Throughput::Elements(cfg.batch as u64));
         group.bench_with_input(BenchmarkId::from_parameter(cfg.name), cfg, |b, _| {
             b.iter(|| {
-                let generated = generate_tokens(
+                let mut state = base_state.clone();
+                let (tokens, _) = advance_generation(
                     &model,
-                    prompt_tokens.clone(),
+                    &mut state,
+                    base_logits.clone(),
                     &device,
                     cfg.batch,
                     1.0,
@@ -116,7 +125,7 @@ fn run_inference_backend<B, Init, Skip>(
                     BENCH_CONTEXT,
                 )
                 .expect("generate tokens");
-                black_box(generated);
+                black_box(tokens);
             });
         });
     }

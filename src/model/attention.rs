@@ -39,7 +39,7 @@ impl<B: Backend> AttentionCache<B> {
             let stream_id = stream_ids[0];
             self.ensure_streams(stream_id + 1);
             let stream_cache = &mut self.streams[stream_id];
-            let position = stream_cache.len();
+            let position = stream_cache.absolute_position();
             let (context, _) =
                 attention.forward_stream_cached(query, value, stream_cache, position);
             return context;
@@ -58,11 +58,13 @@ impl<B: Backend> AttentionCache<B> {
         let mut prev_lengths = Vec::with_capacity(batch);
         let mut prev_keys: Vec<Option<Tensor<B, 4>>> = Vec::with_capacity(batch);
         let mut prev_values: Vec<Option<Tensor<B, 4>>> = Vec::with_capacity(batch);
+        let mut prev_offsets = Vec::with_capacity(batch);
 
         for &stream_id in stream_ids {
             let cache = &self.streams[stream_id];
             let len = cache.len();
             prev_lengths.push(len);
+            prev_offsets.push(cache.offset());
             prev_keys.push(cache.q_rot.clone());
             prev_values.push(cache.value.clone());
         }
@@ -128,6 +130,7 @@ impl<B: Backend> AttentionCache<B> {
             prev_keys_tensor,
             prev_values_tensor,
             &prev_lengths,
+            &prev_offsets,
             effective_prev_len,
         );
 
@@ -183,6 +186,7 @@ struct StreamCache<B: Backend> {
     q_rot: Option<Tensor<B, 4>>,
     value: Option<Tensor<B, 4>>,
     len: usize,
+    offset: usize,
 }
 
 impl<B: Backend> StreamCache<B> {
@@ -190,6 +194,7 @@ impl<B: Backend> StreamCache<B> {
         self.q_rot = None;
         self.value = None;
         self.len = 0;
+        self.offset = 0;
     }
 
     fn append(&mut self, q: Tensor<B, 4>, v: Tensor<B, 4>) {
@@ -216,11 +221,13 @@ impl<B: Backend> StreamCache<B> {
             return;
         }
 
-        if let Some(q) = &self.q_rot {
-            let dims = q.shape().dims::<4>();
-            if dims[2] > max_len {
+        let current_len = self.len();
+        if current_len > max_len {
+            let drop = current_len - max_len;
+            if let Some(q) = self.q_rot.take() {
+                let dims = q.shape().dims::<4>();
                 let start = dims[2] - max_len;
-                let q_new = q.clone().slice([
+                let q_new = q.slice([
                     0..dims[0],
                     0..dims[1],
                     start..dims[2],
@@ -228,13 +235,10 @@ impl<B: Backend> StreamCache<B> {
                 ]);
                 self.q_rot = Some(q_new);
             }
-        }
-
-        if let Some(v) = &self.value {
-            let dims = v.shape().dims::<4>();
-            if dims[2] > max_len {
+            if let Some(v) = self.value.take() {
+                let dims = v.shape().dims::<4>();
                 let start = dims[2] - max_len;
-                let v_new = v.clone().slice([
+                let v_new = v.slice([
                     0..dims[0],
                     0..dims[1],
                     start..dims[2],
@@ -242,6 +246,7 @@ impl<B: Backend> StreamCache<B> {
                 ]);
                 self.value = Some(v_new);
             }
+            self.offset += drop;
         }
 
         self.len = self
@@ -249,6 +254,14 @@ impl<B: Backend> StreamCache<B> {
             .as_ref()
             .map(|tensor| tensor.shape().dims::<4>()[2])
             .unwrap_or(0);
+    }
+
+    fn offset(&self) -> usize {
+        self.offset
+    }
+
+    fn absolute_position(&self) -> usize {
+        self.offset + self.len
     }
 }
 
@@ -329,6 +342,7 @@ impl<B: Backend> Attention<B> {
         prev_keys: Option<Tensor<B, 4>>,
         prev_values: Option<Tensor<B, 4>>,
         prev_lengths: &[usize],
+        prev_offsets: &[usize],
         max_prev_len: usize,
     ) -> (Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 4>) {
         let batch = query.shape().dims::<4>()[0];
@@ -336,8 +350,14 @@ impl<B: Backend> Attention<B> {
         let device = query.device();
 
         let lengths_data: Vec<i64> = prev_lengths.iter().map(|&len| len as i64).collect();
+        let offsets_data: Vec<i64> = prev_offsets.iter().map(|&off| off as i64).collect();
+        let start_positions: Vec<i64> = prev_lengths
+            .iter()
+            .zip(prev_offsets.iter())
+            .map(|(&len, &off)| (len + off) as i64)
+            .collect();
         let starts = Tensor::<B, 1, Int>::from_data(
-            TensorData::new(lengths_data.clone(), [batch]),
+            TensorData::new(start_positions.clone(), [batch]),
             &device,
         )
         .reshape([batch, 1, 1, 1]);
@@ -375,11 +395,19 @@ impl<B: Backend> Attention<B> {
             )
             .reshape([batch, 1, 1, 1])
             .float();
+            let offsets_tensor = Tensor::<B, 1, Int>::from_data(
+                TensorData::new(offsets_data, [batch]),
+                &device,
+            )
+            .reshape([batch, 1, 1, 1])
+            .float();
             let positions_prev = Tensor::<B, 1, Int>::arange(0..max_prev_len as i64, &device)
                 .float()
                 .reshape([1, 1, 1, max_prev_len]);
+            let positions_prev = offsets_tensor.clone() + positions_prev;
             let mask_scores = positions_prev
                 .clone()
+                .sub(offsets_tensor.clone())
                 .lower(lengths_tensor.clone())
                 .float();
             let mask_values = mask_scores.clone().swap_dims(2, 3);
@@ -391,8 +419,7 @@ impl<B: Backend> Attention<B> {
 
             if self.use_alibi {
                 let slopes = self.alibi_slopes.clone().reshape([1, self.n_head, 1, 1]);
-                let alibi_prev = slopes.clone()
-                    * (positions_prev - pos_row.clone());
+                let alibi_prev = slopes.clone() * (positions_prev - pos_row.clone());
                 scores_prev = scores_prev + alibi_prev * mask_scores.clone();
             }
 
@@ -427,6 +454,7 @@ impl<B: Backend> Attention<B> {
         position: usize,
     ) -> (Tensor<B, 4>, usize) {
         let time_new = query.shape().dims::<4>()[2];
+        let prev_offset = cache.offset();
 
         let q_rot = self.rotate(query, position);
         let k_rot = q_rot.clone();
@@ -451,7 +479,10 @@ impl<B: Backend> Attention<B> {
                 .float()
                 .reshape([1, 1, time_new, 1]);
 
-                let pos_prev = Tensor::<B, 1, Int>::arange(0..prev_len as i64, &device)
+                let pos_prev = Tensor::<B, 1, Int>::arange(
+                    prev_offset as i64..(prev_offset + prev_len) as i64,
+                    &device,
+                )
                     .float()
                     .reshape([1, 1, 1, prev_len]);
                 let alibi_prev = slopes.clone() * (pos_prev - pos_row.clone());

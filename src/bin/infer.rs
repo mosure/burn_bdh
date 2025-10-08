@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -9,9 +10,11 @@ use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
 use burn::tensor::backend::Backend;
 use burn_dragon_hatchling::wgpu::init_runtime;
 use burn_dragon_hatchling::{
-    generate_text, ContextStrategyConfig, BDH, BDHConfig, GenerationConfig, ModelOverrides,
-    TrainingConfig, load_training_config,
+    generate_text, ContextStrategy, ContextStrategyConfig, BDH, BDHConfig, GenerationConfig,
+    ModelOverrides, TrainingConfig, TrainingHyperparameters, load_training_config, prefill_state,
+    sample_next_token,
 };
+use burn_dragon_hatchling::tokenizer::{SharedTokenizer, Tokenizer};
 use burn_wgpu::Wgpu;
 
 #[cfg(feature = "cuda")]
@@ -62,63 +65,150 @@ where
     let device = B::Device::default();
     init_backend(&device);
 
-    let tokenizer_path = config
-        .dataset
-        .tokenizer
-        .storage_path(&config.dataset.cache_dir);
-    let tokenizer = if let Some(path) = tokenizer_path {
-        config
-            .dataset
-            .tokenizer
-            .load(&path)
-            .with_context(|| format!("failed to load tokenizer {}", path.display()))?
-    } else {
-        config
-            .dataset
-            .tokenizer
-            .fit(std::iter::empty::<&str>())
-            .context("failed to initialize tokenizer")?
-    };
-
+    let tokenizer = load_tokenizer(config)?;
     let checkpoint_dir = args
         .checkpoint
         .clone()
         .unwrap_or_else(|| PathBuf::from("runs").join(backend_name).join("checkpoint"));
     let (checkpoint_base, epoch) =
         resolve_checkpoint_base(&checkpoint_dir, args.epoch, backend_name)?;
-
-    let mut model_config = build_model_config(&config.model);
-    model_config.vocab_size = tokenizer.len();
-    let mut model = BDH::<B>::new(model_config, &device);
-    let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
-    let record = recorder
-        .load::<<BDH<B> as Module<B>>::Record>(checkpoint_base.clone(), &device)
-        .with_context(|| {
-            format!(
-                "failed to load checkpoint {}",
-                format_checkpoint(&checkpoint_base)
-            )
-        })?;
-    model = model.load_record(record);
+    let model = load_model::<B>(&device, &config.model, tokenizer.len(), &checkpoint_base)?;
 
     let mut generation = config.generation.clone();
     apply_generation_overrides(&mut generation, args, config.training.block_size);
-
-    let output = generate_text::<B>(
-        &model,
-        tokenizer.as_ref(),
-        &device,
-        &config.training,
-        &generation,
-    )?;
 
     eprintln!(
         "Loaded epoch {epoch} from {} using {backend_name} backend.",
         format_checkpoint(&checkpoint_base)
     );
-    println!("{output}");
+
+    if args.streaming {
+        stream_text(
+            &model,
+            tokenizer.as_ref(),
+            &device,
+            &config.training,
+            &generation,
+        )?;
+        io::stdout().flush().ok();
+        println!();
+    } else {
+        let output = generate_text::<B>(
+            &model,
+            tokenizer.as_ref(),
+            &device,
+            &config.training,
+            &generation,
+        )?;
+        println!("{output}");
+    }
 
     Ok(())
+}
+
+fn load_tokenizer(config: &TrainingConfig) -> Result<SharedTokenizer> {
+    let tokenizer_cfg = &config.dataset.tokenizer;
+    if let Some(path) = tokenizer_cfg.storage_path(&config.dataset.cache_dir) {
+        tokenizer_cfg
+            .load(&path)
+            .with_context(|| format!("failed to load tokenizer {}", path.display()))
+    } else {
+        tokenizer_cfg
+            .fit(std::iter::empty::<&str>())
+            .context("failed to initialize tokenizer")
+    }
+}
+
+fn load_model<B: Backend>(
+    device: &B::Device,
+    overrides: &ModelOverrides,
+    vocab_size: usize,
+    checkpoint_base: &Path,
+) -> Result<BDH<B>> {
+    let mut model_config = build_model_config(overrides);
+    model_config.vocab_size = vocab_size;
+    let model = BDH::<B>::new(model_config, device);
+    let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
+    let record = recorder
+        .load::<<BDH<B> as Module<B>>::Record>(checkpoint_base.to_path_buf(), device)
+        .with_context(|| {
+            format!(
+                "failed to load checkpoint {}",
+                format_checkpoint(checkpoint_base)
+            )
+        })?;
+    Ok(model.load_record(record))
+}
+
+fn stream_text<B: Backend>(
+    model: &BDH<B>,
+    tokenizer: &dyn Tokenizer,
+    device: &B::Device,
+    training: &TrainingHyperparameters,
+    generation: &GenerationConfig,
+) -> Result<()> {
+    let strategy =
+        resolve_context_strategy_infer(&generation.context_strategy, training.block_size);
+    let mut prompt_ids = tokenizer.encode(&generation.prompt, false, false);
+    if let ContextStrategy::Sliding { window } = strategy {
+        if window > 0 && prompt_ids.len() > window {
+            prompt_ids = prompt_ids[prompt_ids.len() - window..].to_vec();
+        }
+    }
+
+    let prompt_tokens: Vec<i64> = prompt_ids.iter().map(|&id| id as i64).collect();
+    let prompt_text = tokenizer.decode(&prompt_ids);
+    let (mut state, mut last_logits) = prefill_state(model, &prompt_tokens, device)?;
+
+    let mut stdout = io::stdout();
+    write!(stdout, "{prompt_text}")?;
+    stdout.flush()?;
+
+    for _ in 0..generation.max_tokens {
+        let (next_token, logits) = sample_next_token(
+            model,
+            &mut state,
+            last_logits,
+            generation.temperature,
+            generation.top_k,
+            device,
+        )?;
+        last_logits = logits;
+
+        if let ContextStrategy::Sliding { window } = strategy {
+            if window > 0 {
+                state.trim_stream(0, window);
+            }
+        }
+
+        if next_token < 0 {
+            continue;
+        }
+
+        let token_id = next_token as u32;
+        let piece = tokenizer.decode(&[token_id]);
+        write!(stdout, "{piece}")?;
+        stdout.flush()?;
+    }
+
+    Ok(())
+}
+
+fn resolve_context_strategy_infer(
+    config: &ContextStrategyConfig,
+    default_window: usize,
+) -> ContextStrategy {
+    match config {
+        ContextStrategyConfig::Infinite => ContextStrategy::Infinite,
+        ContextStrategyConfig::Sliding { window } => {
+            let win = if *window == 0 {
+                default_window.max(1)
+            } else {
+                *window
+            };
+            ContextStrategy::Sliding { window: win }
+        }
+    }
 }
 
 fn build_model_config(overrides: &ModelOverrides) -> BDHConfig {
@@ -316,6 +406,9 @@ struct Args {
     /// Sliding window size when using `--context-mode=sliding`.
     #[arg(long, value_name = "N")]
     context_window: Option<usize>,
+    /// Stream tokens to stdout as they are generated.
+    #[arg(long)]
+    streaming: bool,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]

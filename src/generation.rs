@@ -123,21 +123,10 @@ pub fn generate_tokens<B: Backend>(
     strategy: ContextStrategy,
 ) -> Result<Vec<i64>> {
     let mut full_tokens = prompt_tokens;
-    let (mut state, mut last_logits) = prefill_state(model, &full_tokens, device)?;
-
-    for _ in 0..max_new_tokens {
-        let (next, logits) =
-            sample_next_token(model, &mut state, last_logits, temperature, top_k, device)?;
-        full_tokens.push(next);
-        last_logits = logits;
-
-        if let ContextStrategy::Sliding { window } = strategy {
-            if window > 0 {
-                state.trim_stream(0, window);
-            }
-        }
-    }
-
+    let (mut state, last_logits) = prefill_state(model, &full_tokens, device)?;
+    let (generated, _) =
+        advance_generation(model, &mut state, last_logits, device, max_new_tokens, temperature, top_k, strategy)?;
+    full_tokens.extend(generated);
     Ok(full_tokens)
 }
 
@@ -173,6 +162,33 @@ pub fn generate_text<B: Backend>(
         .collect();
 
     Ok(tokenizer.decode(&decoded_ids))
+}
+
+pub fn advance_generation<B: Backend>(
+    model: &BDH<B>,
+    state: &mut ModelState<B>,
+    mut last_logits: Tensor<B, 1>,
+    device: &B::Device,
+    steps: usize,
+    temperature: f32,
+    top_k: Option<usize>,
+    strategy: ContextStrategy,
+) -> Result<(Vec<i64>, Tensor<B, 1>)> {
+    let mut generated = Vec::with_capacity(steps);
+    for _ in 0..steps {
+        let (next, logits) =
+            sample_next_token(model, state, last_logits, temperature, top_k, device)?;
+        generated.push(next);
+        last_logits = logits;
+
+        if let ContextStrategy::Sliding { window } = strategy {
+            if window > 0 {
+                state.trim_stream(0, window);
+            }
+        }
+    }
+
+    Ok((generated, last_logits))
 }
 
 fn resolve_context_strategy(config: &ContextStrategyConfig, default_window: usize) -> ContextStrategy {
