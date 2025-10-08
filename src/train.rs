@@ -202,18 +202,33 @@ where
     let tokenizer = dataset.tokenizer();
     model_config.vocab_size = tokenizer.len();
 
-    let steps_per_epoch = dataset.steps_per_epoch(ShakespeareSplit::Train);
+    let steps_per_epoch = dataset
+        .steps_per_epoch(ShakespeareSplit::Train)
+        .max(1);
     let grad_accumulation = training.gradient_accumulation_steps();
     let logical_batch_size = training.effective_logical_batch_size();
     let micro_batch_size = training.batch_size;
-    let optimizer_steps = training.max_iters.max(1);
-    let physical_steps = optimizer_steps.saturating_mul(grad_accumulation);
-    let total_epochs = usize::max(1, physical_steps.div_ceil(steps_per_epoch));
+    let configured_epochs = training.configured_epochs();
+    let configured_max_iters = training.configured_max_iters();
+
+    let (epochs, optimizer_steps, physical_steps) = if let Some(configured) = configured_epochs {
+        let physical_steps = configured.saturating_mul(steps_per_epoch);
+        let optimizer_steps = usize::max(1, physical_steps.div_ceil(grad_accumulation));
+        (configured, optimizer_steps, physical_steps)
+    } else {
+        let optimizer_steps = configured_max_iters.unwrap_or(1).max(1);
+        let physical_steps = optimizer_steps.saturating_mul(grad_accumulation);
+        let epochs = usize::max(1, physical_steps.div_ceil(steps_per_epoch));
+        (epochs, optimizer_steps, physical_steps)
+    };
 
     info!(
         "train schedule: micro_batch_size={micro_batch_size}, logical_batch_size={logical_batch_size}, \
          grad_accumulation={grad_accumulation}, steps_per_epoch={steps_per_epoch}, \
-         optimizer_steps={optimizer_steps}, physical_steps={physical_steps}, epochs={total_epochs}"
+         epochs={epochs} (configured={configured_epochs:?}), optimizer_steps={optimizer_steps} \
+         (configured_max_iters={configured_max_iters:?}), physical_steps={physical_steps}",
+        configured_epochs = configured_epochs,
+        configured_max_iters = configured_max_iters,
     );
 
     let train_context = resolve_training_context(&training.context_strategy, training.block_size);
@@ -260,7 +275,7 @@ where
         device: &device,
         train_loader,
         valid_loader,
-        epochs: total_epochs,
+        epochs,
         grad_accumulation,
         logical_batch_size,
     };

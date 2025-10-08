@@ -9,15 +9,15 @@ vocab_path = "vocab.json"
 
 [training]
 block_size = 512
-batch_size = 32
-logical_batch_size = 64
-max_iters = 3000
+batch_size = 16
+logical_batch_size = 16
+epochs = 32
 log_frequency = 100
 context_strategy = { type = "infinite" }
 
 [optimizer]
 learning_rate = 0.001
-weight_decay = 0.1
+weight_decay = 0.05
 
 [optimizer.lr_schedule]
 type = "cosine"
@@ -34,7 +34,7 @@ top_k = 3
 n_layer = 6
 n_embd = 256
 n_head = 4
-mlp_internal_dim_multiplier = 64
+mlp_internal_dim_multiplier = 128
 dropout = 0.1
 fused_kernels = true
 use_alibi = true

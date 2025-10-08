@@ -22,7 +22,10 @@ pub struct TrainingHyperparameters {
     pub batch_size: usize,
     #[serde(default)]
     pub logical_batch_size: Option<usize>,
-    pub max_iters: usize,
+    #[serde(default)]
+    pub epochs: Option<usize>,
+    #[serde(default)]
+    pub max_iters: Option<usize>,
     pub log_frequency: usize,
     #[serde(default = "default_context_strategy")]
     pub context_strategy: ContextStrategyConfig,
@@ -145,6 +148,16 @@ impl TrainingHyperparameters {
         let physical = self.batch_size.max(1);
         self.effective_logical_batch_size().div_ceil(physical)
     }
+
+    /// Returns the configured number of epochs, if provided and valid.
+    pub fn configured_epochs(&self) -> Option<usize> {
+        self.epochs.and_then(|value| (value > 0).then_some(value))
+    }
+
+    /// Returns the configured maximum optimizer steps, if provided and valid.
+    pub fn configured_max_iters(&self) -> Option<usize> {
+        self.max_iters.and_then(|value| (value > 0).then_some(value))
+    }
 }
 
 pub fn load_training_config(paths: &[PathBuf]) -> Result<TrainingConfig> {
@@ -244,7 +257,7 @@ mod tests {
             "[training]",
             "block_size = 256",
             "batch_size = 16",
-            "max_iters = 1000",
+            "epochs = 10",
             "log_frequency = 50",
             "",
             "[optimizer]",
@@ -276,7 +289,7 @@ mod tests {
 
         let override_contents = [
             "[training]",
-            "max_iters = 2000",
+            "epochs = 12",
             "",
             "[optimizer]",
             "learning_rate = 0.0005",
@@ -302,7 +315,8 @@ mod tests {
                 block_size: 256,
                 batch_size: 16,
                 logical_batch_size: None,
-                max_iters: 2000,
+                epochs: Some(12),
+                max_iters: None,
                 log_frequency: 50,
                 context_strategy: ContextStrategyConfig::Infinite,
             }
