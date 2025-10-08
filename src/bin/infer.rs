@@ -1,4 +1,6 @@
+use std::convert::TryFrom;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -9,8 +11,8 @@ use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
 use burn::tensor::backend::Backend;
 use burn_dragon_hatchling::wgpu::init_runtime;
 use burn_dragon_hatchling::{
-    generate_text, BDH, BDHConfig, GenerationConfig, ModelOverrides, TrainingConfig,
-    load_training_config,
+    BDH, BDHConfig, ContextStrategy, ContextStrategyConfig, GenerationConfig, ModelOverrides,
+    TrainingConfig, generate_text, generate_tokens, load_training_config, resolve_context_strategy,
 };
 use burn_wgpu::Wgpu;
 
@@ -102,21 +104,95 @@ where
     model = model.load_record(record);
 
     let mut generation = config.generation.clone();
-    apply_generation_overrides(&mut generation, args);
+    apply_generation_overrides(&mut generation, args, config.training.block_size);
 
-    let output = generate_text::<B>(
-        &model,
-        tokenizer.as_ref(),
-        &device,
-        &config.training,
-        &generation,
-    )?;
-
-    eprintln!(
+    let status_msg = format!(
         "Loaded epoch {epoch} from {} using {backend_name} backend.",
         format_checkpoint(&checkpoint_base)
     );
-    println!("{output}");
+
+    if args.streaming {
+        let strategy =
+            resolve_context_strategy(&generation.context_strategy, config.training.block_size);
+        eprintln!("{status_msg}");
+
+        let mut prompt_ids = tokenizer.encode(&generation.prompt, false, false);
+        if let ContextStrategy::Sliding { window } = strategy {
+            if prompt_ids.len() > window {
+                prompt_ids = prompt_ids[prompt_ids.len() - window..].to_vec();
+            }
+        }
+
+        let prompt_tokens: Vec<i64> = prompt_ids.iter().map(|&id| id as i64).collect();
+        let prompt_ids_u32: Vec<u32> = prompt_ids.iter().copied().map(|id| id as u32).collect();
+
+        let mut writer = io::stdout();
+        let prompt_text = tokenizer.decode(&prompt_ids_u32);
+        writer
+            .write_all(prompt_text.as_bytes())
+            .context("failed to write prompt to stdout")?;
+        writer.flush().context("failed to flush stdout")?;
+
+        let mut generated_ids: Vec<u32> = Vec::new();
+        let mut last_print_len = 0usize;
+        let mut stream_err: Option<anyhow::Error> = None;
+
+        let mut callback = |token: i64| {
+            if stream_err.is_some() {
+                return;
+            }
+            if let Ok(token_u32) = u32::try_from(token) {
+                generated_ids.push(token_u32);
+                let decoded = tokenizer.decode(&generated_ids);
+                if decoded.len() > last_print_len {
+                    let new_text = &decoded[last_print_len..];
+                    if !new_text.is_empty() {
+                        if let Err(err) = writer.write_all(new_text.as_bytes()) {
+                            stream_err = Some(anyhow!("failed to write streamed token: {err}"));
+                            return;
+                        }
+                        if let Err(err) = writer.flush() {
+                            stream_err =
+                                Some(anyhow!("failed to flush stdout during streaming: {err}"));
+                            return;
+                        }
+                    }
+                    last_print_len = decoded.len();
+                }
+            }
+        };
+
+        generate_tokens::<B>(
+            &model,
+            prompt_tokens,
+            &device,
+            generation.max_tokens,
+            generation.temperature,
+            generation.top_k,
+            strategy,
+            Some(&mut callback),
+        )?;
+
+        if let Some(err) = stream_err {
+            return Err(err);
+        }
+
+        writer
+            .write_all(b"\n")
+            .context("failed to write trailing newline")?;
+        writer.flush().context("failed to flush stdout")?;
+    } else {
+        let output = generate_text::<B>(
+            &model,
+            tokenizer.as_ref(),
+            &device,
+            &config.training,
+            &generation,
+        )?;
+
+        eprintln!("{status_msg}");
+        println!("{output}");
+    }
 
     Ok(())
 }
@@ -157,7 +233,7 @@ fn build_model_config(overrides: &ModelOverrides) -> BDHConfig {
     model_config
 }
 
-fn apply_generation_overrides(generation: &mut GenerationConfig, args: &Args) {
+fn apply_generation_overrides(generation: &mut GenerationConfig, args: &Args, block_size: usize) {
     if let Some(prompt) = &args.prompt {
         generation.prompt = prompt.clone();
     }
@@ -169,6 +245,14 @@ fn apply_generation_overrides(generation: &mut GenerationConfig, args: &Args) {
     }
     if let Some(top_k) = args.top_k {
         generation.top_k = Some(top_k);
+    }
+    if let Some(mode) = args.context_mode {
+        generation.context_strategy = match mode {
+            ContextModeArg::Infinite => ContextStrategyConfig::Infinite,
+            ContextModeArg::Sliding => ContextStrategyConfig::Sliding {
+                window: args.context_window.unwrap_or(block_size).max(1),
+            },
+        };
     }
 }
 
@@ -298,10 +382,25 @@ struct Args {
     /// Override the top-k sampling parameter.
     #[arg(long, value_name = "K")]
     top_k: Option<usize>,
+    /// Override the context strategy.
+    #[arg(long, value_enum)]
+    context_mode: Option<ContextModeArg>,
+    /// Sliding window size when using `--context-mode=sliding`.
+    #[arg(long, value_name = "N")]
+    context_window: Option<usize>,
+    /// Stream tokens to stdout as they are generated.
+    #[arg(long)]
+    streaming: bool,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum BackendArg {
     Wgpu,
     Cuda,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum ContextModeArg {
+    Infinite,
+    Sliding,
 }

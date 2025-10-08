@@ -22,6 +22,8 @@ pub struct TrainingHyperparameters {
     pub batch_size: usize,
     pub max_iters: usize,
     pub log_frequency: usize,
+    #[serde(default = "default_context_strategy")]
+    pub context_strategy: ContextStrategyConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -85,6 +87,25 @@ pub struct GenerationConfig {
     pub temperature: f32,
     #[serde(default)]
     pub top_k: Option<usize>,
+    #[serde(default = "default_context_strategy")]
+    pub context_strategy: ContextStrategyConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContextStrategyConfig {
+    Infinite,
+    Sliding { window: usize },
+}
+
+impl Default for ContextStrategyConfig {
+    fn default() -> Self {
+        ContextStrategyConfig::Infinite
+    }
+}
+
+fn default_context_strategy() -> ContextStrategyConfig {
+    ContextStrategyConfig::Infinite
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Default)]
@@ -265,6 +286,7 @@ mod tests {
                 batch_size: 16,
                 max_iters: 2000,
                 log_frequency: 50,
+                context_strategy: ContextStrategyConfig::Infinite,
             }
         );
         assert!((config.optimizer.learning_rate - 0.0005).abs() < f64::EPSILON);
@@ -280,6 +302,14 @@ mod tests {
         assert_eq!(config.dataset.tokenizer, TokenizerConfig::default());
         assert!((config.dataset.train_split_ratio - 0.8).abs() < f32::EPSILON);
         assert_eq!(config.generation.max_tokens, 64);
+        assert_eq!(
+            config.training.context_strategy,
+            ContextStrategyConfig::Infinite
+        );
+        assert_eq!(
+            config.generation.context_strategy,
+            ContextStrategyConfig::Infinite
+        );
         assert_eq!(config.model.n_layer, Some(6));
         assert_eq!(config.model.n_embd, Some(320));
         assert_eq!(config.model.n_head, Some(4));

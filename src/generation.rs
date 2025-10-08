@@ -5,8 +5,15 @@ use rand::distributions::WeightedIndex;
 use rand::prelude::*;
 use std::cmp::Ordering;
 
+use crate::config::ContextStrategyConfig;
 use crate::tokenizer::Tokenizer;
-use crate::{BDH, GenerationConfig, TrainingHyperparameters, ModelState};
+use crate::{BDH, GenerationConfig, ModelState, TrainingHyperparameters};
+
+#[derive(Clone, Copy, Debug)]
+pub enum ContextStrategy {
+    Infinite,
+    Sliding { window: usize },
+}
 
 pub fn prefill_state<B: Backend>(
     model: &BDH<B>,
@@ -32,9 +39,7 @@ pub fn prefill_state<B: Backend>(
         ));
     }
 
-    let last_logits = logits
-        .slice_dim(1, (time - 1)..time)
-        .reshape([vocab]);
+    let last_logits = logits.slice_dim(1, (time - 1)..time).reshape([vocab]);
 
     Ok((state, last_logits))
 }
@@ -94,14 +99,11 @@ pub fn sample_next_token<B: Backend>(
     let mut rng = thread_rng();
     let next = dist.sample(&mut rng) as i64;
 
-    let next_tensor =
-        Tensor::<B, 2, Int>::from_data(TensorData::new(vec![next], [1, 1]), device);
+    let next_tensor = Tensor::<B, 2, Int>::from_data(TensorData::new(vec![next], [1, 1]), device);
 
     let logits = model.forward_with_state(next_tensor, state);
     let [_, time, vocab] = logits.shape().dims::<3>();
-    let new_last_logits = logits
-        .slice_dim(1, (time - 1)..time)
-        .reshape([vocab]);
+    let new_last_logits = logits.slice_dim(1, (time - 1)..time).reshape([vocab]);
 
     Ok((next, new_last_logits))
 }
@@ -113,25 +115,31 @@ pub fn generate_tokens<B: Backend>(
     max_new_tokens: usize,
     temperature: f32,
     top_k: Option<usize>,
-    context_limit: Option<usize>,
+    strategy: ContextStrategy,
+    mut on_token: Option<&mut dyn FnMut(i64)>,
 ) -> Result<Vec<i64>> {
-    let mut context_tokens = prompt_tokens.clone();
     let mut full_tokens = prompt_tokens;
-    let (mut state, mut last_logits) = prefill_state(model, &context_tokens, device)?;
+    let (mut state, mut last_logits) = prefill_state(model, &full_tokens, device)?;
+
+    if let ContextStrategy::Sliding { window } = strategy {
+        if window > 0 && state.position > window {
+            state.trim(window);
+        }
+    }
 
     for _ in 0..max_new_tokens {
         let (next, logits) =
             sample_next_token(model, &mut state, last_logits, temperature, top_k, device)?;
         full_tokens.push(next);
-        context_tokens.push(next);
         last_logits = logits;
 
-        if let Some(limit) = context_limit {
-            if context_tokens.len() > limit {
-                context_tokens = context_tokens[context_tokens.len() - limit..].to_vec();
-                let (new_state, new_logits) = prefill_state(model, &context_tokens, device)?;
-                state = new_state;
-                last_logits = new_logits;
+        if let Some(callback) = &mut on_token {
+            callback(next);
+        }
+
+        if let ContextStrategy::Sliding { window } = strategy {
+            if window > 0 && state.position > window {
+                state.trim(window);
             }
         }
     }
@@ -146,9 +154,12 @@ pub fn generate_text<B: Backend>(
     training: &TrainingHyperparameters,
     generation: &GenerationConfig,
 ) -> Result<String> {
+    let strategy = resolve_context_strategy(&generation.context_strategy, training.block_size);
     let mut prompt_ids = tokenizer.encode(&generation.prompt, false, false);
-    if prompt_ids.len() > training.block_size {
-        prompt_ids = prompt_ids[prompt_ids.len() - training.block_size..].to_vec();
+    if let ContextStrategy::Sliding { window } = strategy {
+        if prompt_ids.len() > window {
+            prompt_ids = prompt_ids[prompt_ids.len() - window..].to_vec();
+        }
     }
 
     let prompt_tokens: Vec<i64> = prompt_ids.iter().map(|&id| id as i64).collect();
@@ -159,7 +170,8 @@ pub fn generate_text<B: Backend>(
         generation.max_tokens,
         generation.temperature,
         generation.top_k,
-        Some(training.block_size),
+        strategy,
+        None,
     )?;
 
     let decoded_ids: Vec<u32> = tokens_all
@@ -168,4 +180,21 @@ pub fn generate_text<B: Backend>(
         .collect();
 
     Ok(tokenizer.decode(&decoded_ids))
+}
+
+pub fn resolve_context_strategy(
+    config: &ContextStrategyConfig,
+    default_window: usize,
+) -> ContextStrategy {
+    match config {
+        ContextStrategyConfig::Infinite => ContextStrategy::Infinite,
+        ContextStrategyConfig::Sliding { window } => {
+            let win = if *window == 0 {
+                default_window.max(1)
+            } else {
+                *window
+            };
+            ContextStrategy::Sliding { window: win }
+        }
+    }
 }

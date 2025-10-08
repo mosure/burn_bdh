@@ -9,13 +9,16 @@ pub mod tokenizer;
 pub mod wgpu;
 
 pub use config::{
-    DatasetConfig, GenerationConfig, LearningRateScheduleConfig, ModelOverrides, OptimizerConfig,
-    TrainingConfig, TrainingHyperparameters, load_training_config,
+    ContextStrategyConfig, DatasetConfig, GenerationConfig, LearningRateScheduleConfig,
+    ModelOverrides, OptimizerConfig, TrainingConfig, TrainingHyperparameters, load_training_config,
 };
 pub use dataset::{
     ShakespeareBatch, ShakespeareDataset, ShakespeareRandomDataLoader, ShakespeareSplit,
 };
+pub use generation::{
+    ContextStrategy, generate_text, generate_tokens, prefill_state, resolve_context_strategy,
+    sample_next_token,
+};
 pub use kernel::{BlockPattern1d, BlockPattern2d, BlockSparseConfig};
-pub use generation::{generate_text, generate_tokens, prefill_state, sample_next_token};
 pub use model::{BDH, BDHConfig, ModelState, language_model_loss};
 pub use tokenizer::char_vocab::CharVocab;

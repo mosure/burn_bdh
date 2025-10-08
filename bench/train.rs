@@ -65,21 +65,39 @@ where
     let optimizer_config = AdamWConfig::new().with_weight_decay(0.1);
     let lr: LearningRate = 1e-3;
 
+    let max_batch = TRAIN_CONFIGS.iter().map(|cfg| cfg.batch).max().unwrap_or(1);
+    let max_block = TRAIN_CONFIGS.iter().map(|cfg| cfg.block).max().unwrap_or(1);
+    let max_token_count = max_batch * max_block;
+
+    let mut base_input_tokens = Vec::with_capacity(max_token_count);
+    for idx in 0..max_token_count {
+        base_input_tokens.push((idx % 255) as i64);
+    }
+    let base_target_tokens: Vec<i64> = base_input_tokens
+        .iter()
+        .map(|tok| (*tok + 1) % 255)
+        .collect();
+
+    let base_inputs = Tensor::<B, 2, Int>::from_data(
+        TensorData::new(base_input_tokens.clone(), [max_batch, max_block]),
+        &device,
+    );
+    let base_targets = Tensor::<B, 2, Int>::from_data(
+        TensorData::new(base_target_tokens, [max_batch, max_block]),
+        &device,
+    );
+
     let mut group = c.benchmark_group(format!("bdh_single_train_step/{backend_name}"));
 
     for cfg in TRAIN_CONFIGS {
-        let token_count = cfg.batch * cfg.block;
-        let input_tokens: Vec<i64> = (0..token_count).map(|idx| (idx % 255) as i64).collect();
-        let target_tokens: Vec<i64> = input_tokens.iter().map(|tok| (*tok + 1) % 255).collect();
-
-        let inputs = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(input_tokens, [cfg.batch, cfg.block]),
-            &device,
-        );
-        let targets = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(target_tokens, [cfg.batch, cfg.block]),
-            &device,
-        );
+        let inputs = base_inputs
+            .clone()
+            .slice_dim(0, 0..cfg.batch)
+            .slice_dim(1, 0..cfg.block);
+        let targets = base_targets
+            .clone()
+            .slice_dim(0, 0..cfg.batch)
+            .slice_dim(1, 0..cfg.block);
 
         // Warm-up pass to avoid counting shader compilation and graph building.
         {

@@ -246,7 +246,11 @@ impl<B: Backend> BDH<B> {
         tokens: Tensor<B, 2, Int>,
         state: &mut ModelState<B>,
     ) -> Tensor<B, 3> {
-        assert_eq!(state.layers.len(), self.n_layer, "model state layers mismatch");
+        assert_eq!(
+            state.layers.len(),
+            self.n_layer,
+            "model state layers mismatch"
+        );
         let mut current = self.embed.forward(tokens).unsqueeze_dim::<4>(1);
         current = self.layer_norm(current);
 
@@ -311,7 +315,7 @@ impl<B: Backend> BDH<B> {
             current = self.layer_norm(current + mlp_out);
         }
 
-        state.position += current.shape().dims::<4>()[2];
+        state.position = state.len();
 
         let [batch, _, time, dim] = current.shape().dims();
         current

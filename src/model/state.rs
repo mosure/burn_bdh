@@ -27,8 +27,22 @@ impl<B: Backend> ModelState<B> {
 
     pub fn reset(&mut self) {
         for layer in &mut self.layers {
-            layer.attention = AttentionCache::new();
+            layer.attention.reset();
         }
         self.position = 0;
+    }
+
+    pub fn len(&self) -> usize {
+        self.layers
+            .first()
+            .map(|layer| layer.attention.len())
+            .unwrap_or(0)
+    }
+
+    pub fn trim(&mut self, max_len: usize) {
+        for layer in &mut self.layers {
+            layer.attention.retain_last(max_len);
+        }
+        self.position = self.len().min(max_len);
     }
 }

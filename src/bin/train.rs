@@ -19,8 +19,8 @@ use burn::lr_scheduler::{
 };
 use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{AdamW, AdamWConfig};
-use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::Tensor;
+use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn_autodiff::Autodiff;
 use burn_train::metric::{Adaptor, ItemLazy, LearningRateMetric, LossInput, LossMetric};
 use burn_train::{LearnerBuilder, TrainOutput, TrainStep, ValidStep};
@@ -34,9 +34,9 @@ use burn::record::{BinFileRecorder, FullPrecisionSettings};
 
 use burn_dragon_hatchling::wgpu::init_runtime;
 use burn_dragon_hatchling::{
-    generate_text, BDH, BDHConfig, DatasetConfig, LearningRateScheduleConfig, ModelOverrides,
-    OptimizerConfig, ShakespeareBatch, ShakespeareDataset, ShakespeareRandomDataLoader,
-    ShakespeareSplit, TrainingConfig, TrainingHyperparameters, language_model_loss,
+    BDH, BDHConfig, DatasetConfig, LearningRateScheduleConfig, ModelOverrides, OptimizerConfig,
+    ShakespeareBatch, ShakespeareDataset, ShakespeareRandomDataLoader, ShakespeareSplit,
+    TrainingConfig, TrainingHyperparameters, generate_text, language_model_loss,
     load_training_config,
 };
 
