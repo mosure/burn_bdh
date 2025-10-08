@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 
 use crate::config::ContextStrategyConfig;
 use crate::tokenizer::Tokenizer;
-use crate::{BDH, GenerationConfig, TrainingHyperparameters, ModelState};
+use crate::{BDH, GenerationConfig, ModelState, TrainingHyperparameters};
 
 #[derive(Clone, Copy, Debug)]
 pub enum ContextStrategy {
@@ -39,9 +39,7 @@ pub fn prefill_state<B: Backend>(
         ));
     }
 
-    let last_logits = logits
-        .slice_dim(1, (time - 1)..time)
-        .reshape([vocab]);
+    let last_logits = logits.slice_dim(1, (time - 1)..time).reshape([vocab]);
 
     Ok((state, last_logits))
 }
@@ -101,14 +99,11 @@ pub fn sample_next_token<B: Backend>(
     let mut rng = thread_rng();
     let next = dist.sample(&mut rng) as i64;
 
-    let next_tensor =
-        Tensor::<B, 2, Int>::from_data(TensorData::new(vec![next], [1, 1]), device);
+    let next_tensor = Tensor::<B, 2, Int>::from_data(TensorData::new(vec![next], [1, 1]), device);
 
     let logits = model.forward_with_state(next_tensor, state);
     let [_, time, vocab] = logits.shape().dims::<3>();
-    let new_last_logits = logits
-        .slice_dim(1, (time - 1)..time)
-        .reshape([vocab]);
+    let new_last_logits = logits.slice_dim(1, (time - 1)..time).reshape([vocab]);
 
     Ok((next, new_last_logits))
 }
@@ -124,8 +119,16 @@ pub fn generate_tokens<B: Backend>(
 ) -> Result<Vec<i64>> {
     let mut full_tokens = prompt_tokens;
     let (mut state, last_logits) = prefill_state(model, &full_tokens, device)?;
-    let (generated, _) =
-        advance_generation(model, &mut state, last_logits, device, max_new_tokens, temperature, top_k, strategy)?;
+    let (generated, _) = advance_generation(
+        model,
+        &mut state,
+        last_logits,
+        device,
+        max_new_tokens,
+        temperature,
+        top_k,
+        strategy,
+    )?;
     full_tokens.extend(generated);
     Ok(full_tokens)
 }
@@ -191,11 +194,18 @@ pub fn advance_generation<B: Backend>(
     Ok((generated, last_logits))
 }
 
-fn resolve_context_strategy(config: &ContextStrategyConfig, default_window: usize) -> ContextStrategy {
+fn resolve_context_strategy(
+    config: &ContextStrategyConfig,
+    default_window: usize,
+) -> ContextStrategy {
     match config {
         ContextStrategyConfig::Infinite => ContextStrategy::Infinite,
         ContextStrategyConfig::Sliding { window } => {
-            let win = if *window == 0 { default_window.max(1) } else { *window };
+            let win = if *window == 0 {
+                default_window.max(1)
+            } else {
+                *window
+            };
             ContextStrategy::Sliding { window: win }
         }
     }

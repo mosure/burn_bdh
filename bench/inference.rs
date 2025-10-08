@@ -2,7 +2,7 @@
 
 use burn::tensor::backend::Backend as BackendTrait;
 use burn_dragon_hatchling::{
-    advance_generation, prefill_state, ContextStrategy, BDH, BDHConfig, wgpu::init_runtime,
+    BDH, BDHConfig, ContextStrategy, advance_generation, prefill_state, wgpu::init_runtime,
 };
 use burn_wgpu::Wgpu;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};

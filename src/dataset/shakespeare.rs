@@ -2,18 +2,18 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use burn::data::dataloader::{DataLoader, DataLoaderIterator, Progress};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
+use rand::SeedableRng;
 use rand::prelude::*;
 use rand::rngs::StdRng;
-use rand::SeedableRng;
 
-use crate::tokenizer::{SharedTokenizer, TokenizerConfig};
 use crate::ContextStrategy;
+use crate::tokenizer::{SharedTokenizer, TokenizerConfig};
 
 const SHAKESPEARE_URL: &str =
     "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt";
@@ -136,12 +136,7 @@ impl ShakespeareDataset {
         &self,
         split: ShakespeareSplit,
         device: &B::Device,
-    ) -> (
-        Tensor<B, 2, Int>,
-        Tensor<B, 2, Int>,
-        Vec<bool>,
-        Vec<usize>,
-    ) {
+    ) -> (Tensor<B, 2, Int>, Tensor<B, 2, Int>, Vec<bool>, Vec<usize>) {
         let (offset, span) = self.split_offset_and_span(split);
 
         let mut rng = thread_rng();
@@ -217,8 +212,7 @@ impl<B: Backend> ShakespeareBatch<B> {
         let batch = inputs.shape().dims::<2>()[0];
         let stream_count = stream_ids.len();
         debug_assert_eq!(
-            batch,
-            stream_count,
+            batch, stream_count,
             "tbptt stream id count must match batch rows"
         );
         debug_assert_eq!(

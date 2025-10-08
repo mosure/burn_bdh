@@ -19,26 +19,26 @@ use burn::lr_scheduler::{
 };
 use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{AdamW, AdamWConfig};
-use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::Tensor;
+use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn_autodiff::Autodiff;
 use burn_train::metric::{Adaptor, ItemLazy, LearningRateMetric, LossInput, LossMetric};
 use burn_train::{LearnerBuilder, TrainOutput, TrainStep, ValidStep};
 use burn_wgpu::Wgpu;
-use tracing::info;
+use tracing::{info, warn};
 
 #[cfg(feature = "cuda")]
 use burn_cuda::Cuda;
 
 use burn::record::{BinFileRecorder, FullPrecisionSettings};
 
-use burn_dragon_hatchling::wgpu::init_runtime;
 use burn_dragon_hatchling::config::ContextStrategyConfig;
+use burn_dragon_hatchling::wgpu::init_runtime;
 use burn_dragon_hatchling::{
-    generate_text, BDH, BDHConfig, ContextStrategy, DatasetConfig, LearningRateScheduleConfig,
-    ModelOverrides, OptimizerConfig, ShakespeareBatch, ShakespeareDataset,
-    ShakespeareRandomDataLoader, ShakespeareSplit, ShakespeareStreamDataLoader, TrainingConfig,
-    TrainingHyperparameters, language_model_loss, load_training_config,
+    BDH, BDHConfig, ContextStrategy, DatasetConfig, LearningRateScheduleConfig, ModelOverrides,
+    OptimizerConfig, ShakespeareBatch, ShakespeareDataset, ShakespeareRandomDataLoader,
+    ShakespeareSplit, ShakespeareStreamDataLoader, TrainingConfig, TrainingHyperparameters,
+    generate_text, language_model_loss, load_training_config,
 };
 
 #[derive(Parser, Debug)]
@@ -202,9 +202,7 @@ where
     let tokenizer = dataset.tokenizer();
     model_config.vocab_size = tokenizer.len();
 
-    let steps_per_epoch = dataset
-        .steps_per_epoch(ShakespeareSplit::Train)
-        .max(1);
+    let steps_per_epoch = dataset.steps_per_epoch(ShakespeareSplit::Train).max(1);
     let grad_accumulation = training.gradient_accumulation_steps();
     let logical_batch_size = training.effective_logical_batch_size();
     let micro_batch_size = training.batch_size;
@@ -264,7 +262,12 @@ where
             .with_weight_decay(optimizer_cfg.weight_decay)
             .init::<B, BDH<B>>(),
     );
-    let scheduler = resolve_lr_scheduler(optimizer_cfg, optimizer_steps, &model_config)?;
+    let scheduler = resolve_lr_scheduler(
+        optimizer_cfg,
+        optimizer_steps,
+        &model_config,
+        training.configured_epochs(),
+    )?;
 
     let run_dir = PathBuf::from("runs").join(backend_name);
     let context = TrainEnvironment {
@@ -383,9 +386,7 @@ where
     if env.grad_accumulation > 1 {
         info!(
             "applying gradient accumulation: steps={}, micro_batch_size={}, logical_batch_size={}",
-            env.grad_accumulation,
-            env.training.batch_size,
-            env.logical_batch_size,
+            env.grad_accumulation, env.training.batch_size, env.logical_batch_size,
         );
         builder = builder.grads_accumulation(env.grad_accumulation);
     }
@@ -406,9 +407,22 @@ fn resolve_lr_scheduler(
     optimizer_cfg: &OptimizerConfig,
     total_steps: usize,
     model_config: &BDHConfig,
+    configured_epochs: Option<usize>,
 ) -> Result<ResolvedLrScheduler> {
     let base_lr = optimizer_cfg.learning_rate;
     let fallback_iters = total_steps.max(1);
+    let derived_iters = configured_epochs.map(|_| fallback_iters);
+    let reconcile_iters = |configured: Option<usize>| -> (usize, Option<(usize, usize)>) {
+        if let Some(expected) = derived_iters {
+            match configured {
+                Some(value) if value != expected => (expected.max(1), Some((value, expected))),
+                Some(value) => (value.max(1), None),
+                None => (expected.max(1), None),
+            }
+        } else {
+            (configured.unwrap_or(fallback_iters).max(1), None)
+        }
+    };
 
     let schedule = match &optimizer_cfg.lr_schedule {
         None => ResolvedLrScheduler::Constant(base_lr),
@@ -421,13 +435,18 @@ fn resolve_lr_scheduler(
             num_iters,
         }) => {
             let init_lr = initial_lr.unwrap_or(base_lr);
-            let scheduler = CosineAnnealingLrSchedulerConfig::new(
-                init_lr,
-                num_iters.unwrap_or(fallback_iters).max(1),
-            )
-            .with_min_lr(min_lr.unwrap_or(0.0))
-            .init()
-            .map_err(|err| anyhow!("failed to initialize cosine lr scheduler: {err}"))?;
+            let (iter_count, mismatch) = reconcile_iters(*num_iters);
+            if let Some((configured, expected)) = mismatch {
+                warn!(
+                    "optimizer.lr_schedule.num_iters={} ignored; derived {} optimizer steps \
+                     from training.epochs to keep schedules aligned",
+                    configured, expected
+                );
+            }
+            let scheduler = CosineAnnealingLrSchedulerConfig::new(init_lr, iter_count)
+                .with_min_lr(min_lr.unwrap_or(0.0))
+                .init()
+                .map_err(|err| anyhow!("failed to initialize cosine lr scheduler: {err}"))?;
             ResolvedLrScheduler::Cosine(scheduler)
         }
         Some(LearningRateScheduleConfig::Linear {
@@ -436,13 +455,17 @@ fn resolve_lr_scheduler(
             num_iters,
         }) => {
             let init_lr = initial_lr.unwrap_or(base_lr);
-            let scheduler = LinearLrSchedulerConfig::new(
-                init_lr,
-                *final_lr,
-                num_iters.unwrap_or(fallback_iters).max(1),
-            )
-            .init()
-            .map_err(|err| anyhow!("failed to initialize linear lr scheduler: {err}"))?;
+            let (iter_count, mismatch) = reconcile_iters(*num_iters);
+            if let Some((configured, expected)) = mismatch {
+                warn!(
+                    "optimizer.lr_schedule.num_iters={} ignored; derived {} optimizer steps \
+                     from training.epochs to keep schedules aligned",
+                    configured, expected
+                );
+            }
+            let scheduler = LinearLrSchedulerConfig::new(init_lr, *final_lr, iter_count)
+                .init()
+                .map_err(|err| anyhow!("failed to initialize linear lr scheduler: {err}"))?;
             ResolvedLrScheduler::Linear(scheduler)
         }
         Some(LearningRateScheduleConfig::Exponential { initial_lr, gamma }) => {

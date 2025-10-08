@@ -8,13 +8,13 @@ use clap::{Parser, ValueEnum};
 use burn::module::Module;
 use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
 use burn::tensor::backend::Backend;
+use burn_dragon_hatchling::tokenizer::{SharedTokenizer, Tokenizer};
 use burn_dragon_hatchling::wgpu::init_runtime;
 use burn_dragon_hatchling::{
-    generate_text, ContextStrategy, ContextStrategyConfig, BDH, BDHConfig, GenerationConfig,
-    ModelOverrides, TrainingConfig, TrainingHyperparameters, load_training_config, prefill_state,
+    BDH, BDHConfig, ContextStrategy, ContextStrategyConfig, GenerationConfig, ModelOverrides,
+    TrainingConfig, TrainingHyperparameters, generate_text, load_training_config, prefill_state,
     sample_next_token,
 };
-use burn_dragon_hatchling::tokenizer::{SharedTokenizer, Tokenizer};
 use burn_wgpu::Wgpu;
 
 #[cfg(feature = "cuda")]
@@ -247,11 +247,7 @@ fn build_model_config(overrides: &ModelOverrides) -> BDHConfig {
     model_config
 }
 
-fn apply_generation_overrides(
-    generation: &mut GenerationConfig,
-    args: &Args,
-    block_size: usize,
-) {
+fn apply_generation_overrides(generation: &mut GenerationConfig, args: &Args, block_size: usize) {
     if let Some(prompt) = &args.prompt {
         generation.prompt = prompt.clone();
     }

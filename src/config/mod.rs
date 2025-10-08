@@ -156,7 +156,8 @@ impl TrainingHyperparameters {
 
     /// Returns the configured maximum optimizer steps, if provided and valid.
     pub fn configured_max_iters(&self) -> Option<usize> {
-        self.max_iters.and_then(|value| (value > 0).then_some(value))
+        self.max_iters
+            .and_then(|value| (value > 0).then_some(value))
     }
 }
 
@@ -334,8 +335,14 @@ mod tests {
         assert_eq!(config.dataset.tokenizer, TokenizerConfig::default());
         assert!((config.dataset.train_split_ratio - 0.8).abs() < f32::EPSILON);
         assert_eq!(config.generation.max_tokens, 64);
-        assert_eq!(config.training.context_strategy, ContextStrategyConfig::Infinite);
-        assert_eq!(config.generation.context_strategy, ContextStrategyConfig::Infinite);
+        assert_eq!(
+            config.training.context_strategy,
+            ContextStrategyConfig::Infinite
+        );
+        assert_eq!(
+            config.generation.context_strategy,
+            ContextStrategyConfig::Infinite
+        );
         assert_eq!(config.model.n_layer, Some(6));
         assert_eq!(config.model.n_embd, Some(320));
         assert_eq!(config.model.n_head, Some(4));

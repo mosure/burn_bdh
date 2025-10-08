@@ -3,9 +3,9 @@ cache_dir = "data"
 train_split_ratio = 0.9
 
 [dataset.tokenizer]
-type = "char"
-include_unknown = true
-vocab_path = "vocab.json"
+type = "byte"
+# include_unknown = true
+# vocab_path = "vocab.json"
 
 [training]
 block_size = 512
@@ -22,7 +22,6 @@ weight_decay = 0.05
 [optimizer.lr_schedule]
 type = "cosine"
 min_lr = 0.00005
-num_iters = 3000
 
 [generation]
 prompt = "To be or "

@@ -1,5 +1,6 @@
 use burn::module::{
-    AutodiffModule, Content, Module, ModuleMapper, ModuleVisitor, ModuleDisplay, ModuleDisplayDefault, Param, Devices,
+    AutodiffModule, Content, Devices, Module, ModuleDisplay, ModuleDisplayDefault, ModuleMapper,
+    ModuleVisitor, Param,
 };
 use burn::nn::{Dropout, DropoutConfig, Embedding, EmbeddingConfig};
 use burn::tensor::backend::{AutodiffBackend, Backend};
@@ -9,8 +10,8 @@ use rand::prelude::*;
 use std::cell::{RefCell, RefMut};
 use std::cmp::Ordering;
 
-use crate::kernel::{BlockPattern1d, relu_lowrank};
 use crate::ContextStrategy;
+use crate::kernel::{BlockPattern1d, relu_lowrank};
 
 use super::attention::{Attention, AttentionCache};
 use super::config::{BDHConfig, FusedKernelConfig};
@@ -88,15 +89,13 @@ impl<B: Backend> BDH<B> {
         }
     }
 
-    pub fn configure_tbptt(
-        &self,
-        strategy: ContextStrategy,
-        batch_size: usize,
-        block_size: usize,
-    ) {
-        self.tbptt
-            .borrow_mut()
-            .replace(TbpttRuntime::new(strategy, batch_size, self.n_layer, block_size));
+    pub fn configure_tbptt(&self, strategy: ContextStrategy, batch_size: usize, block_size: usize) {
+        self.tbptt.borrow_mut().replace(TbpttRuntime::new(
+            strategy,
+            batch_size,
+            self.n_layer,
+            block_size,
+        ));
     }
 
     pub fn disable_tbptt(&self) {
@@ -314,7 +313,11 @@ impl<B: Backend> BDH<B> {
         state: &mut ModelState<B>,
         stream_ids: &[usize],
     ) -> Tensor<B, 3> {
-        assert_eq!(state.layers.len(), self.n_layer, "model state layers mismatch");
+        assert_eq!(
+            state.layers.len(),
+            self.n_layer,
+            "model state layers mismatch"
+        );
         assert_eq!(
             tokens.shape().dims::<2>()[0],
             stream_ids.len(),

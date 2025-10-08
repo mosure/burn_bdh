@@ -19,8 +19,7 @@ impl<B: Backend> AttentionCache<B> {
 
     pub fn ensure_streams(&mut self, count: usize) {
         if self.streams.len() < count {
-            self.streams
-                .resize_with(count, StreamCache::<B>::default);
+            self.streams.resize_with(count, StreamCache::<B>::default);
         }
     }
 
@@ -227,23 +226,13 @@ impl<B: Backend> StreamCache<B> {
             if let Some(q) = self.q_rot.take() {
                 let dims = q.shape().dims::<4>();
                 let start = dims[2] - max_len;
-                let q_new = q.slice([
-                    0..dims[0],
-                    0..dims[1],
-                    start..dims[2],
-                    0..dims[3],
-                ]);
+                let q_new = q.slice([0..dims[0], 0..dims[1], start..dims[2], 0..dims[3]]);
                 self.q_rot = Some(q_new);
             }
             if let Some(v) = self.value.take() {
                 let dims = v.shape().dims::<4>();
                 let start = dims[2] - max_len;
-                let v_new = v.slice([
-                    0..dims[0],
-                    0..dims[1],
-                    start..dims[2],
-                    0..dims[3],
-                ]);
+                let v_new = v.slice([0..dims[0], 0..dims[1], start..dims[2], 0..dims[3]]);
                 self.value = Some(v_new);
             }
             self.offset += drop;
@@ -325,7 +314,6 @@ impl<B: Backend> Attention<B> {
             );
         }
 
-
         let q_rot = self.rotate(query, 0);
         let k_rot = q_rot.clone();
 
@@ -389,18 +377,14 @@ impl<B: Backend> Attention<B> {
         let mut scores_prev_opt = None;
 
         if max_prev_len > 0 {
-            let lengths_tensor = Tensor::<B, 1, Int>::from_data(
-                TensorData::new(lengths_data, [batch]),
-                &device,
-            )
-            .reshape([batch, 1, 1, 1])
-            .float();
-            let offsets_tensor = Tensor::<B, 1, Int>::from_data(
-                TensorData::new(offsets_data, [batch]),
-                &device,
-            )
-            .reshape([batch, 1, 1, 1])
-            .float();
+            let lengths_tensor =
+                Tensor::<B, 1, Int>::from_data(TensorData::new(lengths_data, [batch]), &device)
+                    .reshape([batch, 1, 1, 1])
+                    .float();
+            let offsets_tensor =
+                Tensor::<B, 1, Int>::from_data(TensorData::new(offsets_data, [batch]), &device)
+                    .reshape([batch, 1, 1, 1])
+                    .float();
             let positions_prev = Tensor::<B, 1, Int>::arange(0..max_prev_len as i64, &device)
                 .float()
                 .reshape([1, 1, 1, max_prev_len]);
@@ -413,8 +397,9 @@ impl<B: Backend> Attention<B> {
             let mask_values = mask_scores.clone().swap_dims(2, 3);
 
             let prev_values_masked = prev_values_tensor.clone() * mask_values.clone();
-            let mut scores_prev =
-                q_rot.clone().matmul(prev_keys_tensor.clone().swap_dims(2, 3));
+            let mut scores_prev = q_rot
+                .clone()
+                .matmul(prev_keys_tensor.clone().swap_dims(2, 3));
             scores_prev = scores_prev * mask_scores.clone();
 
             if self.use_alibi {
@@ -462,10 +447,7 @@ impl<B: Backend> Attention<B> {
 
         let context = if let (Some(prev_q), Some(prev_v)) = (&cache.q_rot, &cache.value) {
             let scores_prev = q_rot.clone().matmul(prev_q.clone().swap_dims(2, 3));
-            let mut scores_self = q_rot
-                .clone()
-                .matmul(k_rot.clone().swap_dims(2, 3))
-                .tril(-1);
+            let mut scores_self = q_rot.clone().matmul(k_rot.clone().swap_dims(2, 3)).tril(-1);
 
             let scores_prev = if self.use_alibi {
                 let device = q_rot.device();
@@ -483,8 +465,8 @@ impl<B: Backend> Attention<B> {
                     prev_offset as i64..(prev_offset + prev_len) as i64,
                     &device,
                 )
-                    .float()
-                    .reshape([1, 1, 1, prev_len]);
+                .float()
+                .reshape([1, 1, 1, prev_len]);
                 let alibi_prev = slopes.clone() * (pos_prev - pos_row.clone());
 
                 let pos_new = Tensor::<B, 1, Int>::arange(
@@ -505,10 +487,7 @@ impl<B: Backend> Attention<B> {
             let value_all = Tensor::cat(vec![prev_v.clone(), value_rep.clone()], 2);
             scores.matmul(value_all)
         } else {
-            let mut scores = q_rot
-                .clone()
-                .matmul(k_rot.clone().swap_dims(2, 3))
-                .tril(-1);
+            let mut scores = q_rot.clone().matmul(k_rot.clone().swap_dims(2, 3)).tril(-1);
             if self.use_alibi {
                 let device = q_rot.device();
                 let slopes = self.alibi_slopes.clone().reshape([1, self.n_head, 1, 1]);
