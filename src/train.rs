@@ -33,11 +33,12 @@ use burn_cuda::Cuda;
 use burn::record::{BinFileRecorder, FullPrecisionSettings};
 
 use burn_dragon_hatchling::wgpu::init_runtime;
+use burn_dragon_hatchling::config::ContextStrategyConfig;
 use burn_dragon_hatchling::{
-    generate_text, BDH, BDHConfig, DatasetConfig, LearningRateScheduleConfig, ModelOverrides,
-    OptimizerConfig, ShakespeareBatch, ShakespeareDataset, ShakespeareRandomDataLoader,
-    ShakespeareSplit, TrainingConfig, TrainingHyperparameters, language_model_loss,
-    load_training_config,
+    generate_text, BDH, BDHConfig, ContextStrategy, DatasetConfig, LearningRateScheduleConfig,
+    ModelOverrides, OptimizerConfig, ShakespeareBatch, ShakespeareDataset,
+    ShakespeareRandomDataLoader, ShakespeareSplit, ShakespeareStreamDataLoader, TrainingConfig,
+    TrainingHyperparameters, language_model_loss, load_training_config,
 };
 
 #[derive(Parser, Debug)]
@@ -118,7 +119,9 @@ type ValidBackend<B> = <B as AutodiffBackend>::InnerBackend;
 
 impl<B: AutodiffBackend> TrainStep<ShakespeareBatch<B>, LanguageModelTrainItem<B>> for BDH<B> {
     fn step(&self, batch: ShakespeareBatch<B>) -> TrainOutput<LanguageModelTrainItem<B>> {
-        let logits = self.forward(batch.inputs);
+        let logits = self
+            .forward_tbptt(batch.inputs.clone(), &batch.resets, &batch.stream_ids)
+            .unwrap_or_else(|| self.forward(batch.inputs.clone()));
         let loss = language_model_loss::<B>(logits, batch.targets);
         let grads = loss.backward();
 
@@ -207,13 +210,15 @@ where
         "train schedule: steps_per_epoch={steps_per_epoch}, total_steps={total_steps}, epochs={total_epochs}"
     );
 
+    let train_context = resolve_training_context(&training.context_strategy, training.block_size);
     let train_loader: Arc<dyn DataLoader<B, ShakespeareBatch<B>>> =
-        Arc::new(ShakespeareRandomDataLoader::<B>::new(
+        Arc::new(ShakespeareStreamDataLoader::<B>::new(
             Arc::clone(&dataset),
             ShakespeareSplit::Train,
             &device,
             steps_per_epoch,
             Some(total_steps),
+            train_context,
         ));
 
     let val_steps_per_epoch = dataset.steps_per_epoch(ShakespeareSplit::Val);
@@ -230,7 +235,9 @@ where
             None,
         ));
 
-    let mut model = Some(BDH::<B>::new(model_config.clone(), &device));
+    let model_instance = BDH::<B>::new(model_config.clone(), &device);
+    model_instance.configure_tbptt(train_context, training.batch_size, training.block_size);
+    let mut model = Some(model_instance);
     let mut optim = Some(
         AdamWConfig::new()
             .with_weight_decay(optimizer_cfg.weight_decay)
@@ -494,6 +501,19 @@ fn prepare_dataset(
     };
 
     Ok(dataset)
+}
+
+fn resolve_training_context(
+    strategy: &ContextStrategyConfig,
+    block_size: usize,
+) -> ContextStrategy {
+    match strategy {
+        ContextStrategyConfig::Infinite => ContextStrategy::Infinite,
+        ContextStrategyConfig::Sliding { window } => {
+            let limit = (*window).max(block_size).max(1);
+            ContextStrategy::Sliding { window: limit }
+        }
+    }
 }
 
 fn build_model_config(overrides: &ModelOverrides) -> BDHConfig {

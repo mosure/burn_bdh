@@ -5,7 +5,7 @@
 [![crates.io](https://img.shields.io/crates/v/burn_dragon_hatchling.svg)](https://crates.io/crates/burn_dragon_hatchling)
 
 
-burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2509.26507) model
+burn inference and training of [dragon hatchling](https://arxiv.org/abs/2509.26507) model
 
 
 ![Alt text](./docs/vocab.png)
@@ -16,6 +16,7 @@ burn inference and training of (baby) [dragon hatchling](https://arxiv.org/abs/2
 
 - [x] cached inference
 - [x] training benchmarks and reporting
+- [x] multi-stream truncated backpropagation through time
 - [ ] adaptive tool discovery
 - [ ] conditional (deep) gating
 - [ ] document-coherent dataloading and scale mixup

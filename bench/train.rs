@@ -7,7 +7,7 @@ use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::{AutodiffBackend, Backend as BackendTrait};
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_autodiff::Autodiff;
-use burn_dragon_hatchling::{BDH, BDHConfig, language_model_loss, wgpu::init_runtime};
+use burn_dragon_hatchling::{BDH, BDHConfig, ContextStrategy, language_model_loss, wgpu::init_runtime};
 use burn_wgpu::Wgpu;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
@@ -81,11 +81,23 @@ where
             &device,
         );
 
+        let resets = vec![true; cfg.batch];
+        let stream_ids: Vec<usize> = (0..cfg.batch).collect();
+
         // Warm-up pass to avoid counting shader compilation and graph building.
         {
             let model = base_model.clone();
+            model.configure_tbptt(
+                ContextStrategy::Sliding {
+                    window: cfg.block.max(1),
+                },
+                cfg.batch,
+                cfg.block,
+            );
             let mut optimizer = optimizer_config.clone().init::<B, BDH<B>>();
-            let logits = model.forward(inputs.clone());
+            let logits = model
+                .forward_tbptt(inputs.clone(), &resets, &stream_ids)
+                .unwrap_or_else(|| model.forward(inputs.clone()));
             let loss = language_model_loss::<B>(logits, targets.clone());
             let grads = loss.backward();
             let grads = GradientsParams::from_grads(grads, &model);
@@ -101,10 +113,18 @@ where
 
                 for _ in 0..iters {
                     let model = base_model.clone();
+                    model.configure_tbptt(
+                        ContextStrategy::Sliding {
+                            window: cfg.block.max(1),
+                        },
+                        cfg.batch,
+                        cfg.block,
+                    );
                     let mut optimizer = optimizer_config.clone().init::<B, BDH<B>>();
-
                     let start = Instant::now();
-                    let logits = model.forward(inputs.clone());
+                    let logits = model
+                        .forward_tbptt(inputs.clone(), &resets, &stream_ids)
+                        .unwrap_or_else(|| model.forward(inputs.clone()));
                     let loss = language_model_loss::<B>(logits, targets.clone());
                     let grads = loss.backward();
                     let grads = GradientsParams::from_grads(grads, &model);

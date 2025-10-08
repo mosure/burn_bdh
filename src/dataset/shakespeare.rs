@@ -2,14 +2,18 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use burn::data::dataloader::{DataLoader, DataLoaderIterator, Progress};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 use rand::prelude::*;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 
 use crate::tokenizer::{SharedTokenizer, TokenizerConfig};
+use crate::ContextStrategy;
 
 const SHAKESPEARE_URL: &str =
     "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt";
@@ -132,7 +136,12 @@ impl ShakespeareDataset {
         &self,
         split: ShakespeareSplit,
         device: &B::Device,
-    ) -> (Tensor<B, 2, Int>, Tensor<B, 2, Int>) {
+    ) -> (
+        Tensor<B, 2, Int>,
+        Tensor<B, 2, Int>,
+        Vec<bool>,
+        Vec<usize>,
+    ) {
         let (offset, span) = self.split_offset_and_span(split);
 
         let mut rng = thread_rng();
@@ -163,7 +172,10 @@ impl ShakespeareDataset {
             device,
         );
 
-        (inputs_tensor, targets_tensor)
+        let resets = vec![true; self.batch_size];
+        let stream_ids: Vec<usize> = (0..self.batch_size).collect();
+
+        (inputs_tensor, targets_tensor, resets, stream_ids)
     }
 
     pub fn decode(&self, tokens: &[i64]) -> String {
@@ -191,11 +203,35 @@ impl ShakespeareDataset {
 pub struct ShakespeareBatch<B: Backend> {
     pub inputs: Tensor<B, 2, Int>,
     pub targets: Tensor<B, 2, Int>,
+    pub resets: Vec<bool>,
+    pub stream_ids: Vec<usize>,
 }
 
 impl<B: Backend> ShakespeareBatch<B> {
-    fn new(inputs: Tensor<B, 2, Int>, targets: Tensor<B, 2, Int>) -> Self {
-        Self { inputs, targets }
+    fn new(
+        inputs: Tensor<B, 2, Int>,
+        targets: Tensor<B, 2, Int>,
+        resets: Vec<bool>,
+        stream_ids: Vec<usize>,
+    ) -> Self {
+        let batch = inputs.shape().dims::<2>()[0];
+        let stream_count = stream_ids.len();
+        debug_assert_eq!(
+            batch,
+            stream_count,
+            "tbptt stream id count must match batch rows"
+        );
+        debug_assert_eq!(
+            stream_count,
+            resets.len(),
+            "tbptt reset count must match stream ids"
+        );
+        Self {
+            inputs,
+            targets,
+            resets,
+            stream_ids,
+        }
     }
 }
 
@@ -334,13 +370,309 @@ impl<B: Backend> Iterator for ShakespeareRandomIterator<B> {
             }
         }
 
-        let (inputs, targets) = self.dataset.sample_batch::<B>(self.split, &self.device);
+        let (inputs, targets, resets, stream_ids) =
+            self.dataset.sample_batch::<B>(self.split, &self.device);
 
-        Some(ShakespeareBatch::new(inputs, targets))
+        Some(ShakespeareBatch::new(inputs, targets, resets, stream_ids))
     }
 }
 
 impl<B: Backend> DataLoaderIterator<ShakespeareBatch<B>> for ShakespeareRandomIterator<B> {
+    fn progress(&self) -> Progress {
+        Progress::new(
+            self.step * self.dataset.batch_size(),
+            self.steps_total * self.dataset.batch_size(),
+        )
+    }
+}
+
+pub struct ShakespeareStreamDataLoader<B: Backend> {
+    dataset: Arc<ShakespeareDataset>,
+    split: ShakespeareSplit,
+    device: B::Device,
+    steps_per_epoch: usize,
+    total_steps: Option<usize>,
+    consumed_steps: Option<Arc<AtomicUsize>>,
+    positions: Arc<Mutex<Vec<usize>>>,
+    tokens_since_reset: Arc<Mutex<Vec<usize>>>,
+    pending_reset: Arc<Mutex<Vec<bool>>>,
+    rng: Arc<Mutex<StdRng>>,
+    initialized: Arc<AtomicBool>,
+    context_window: Option<usize>,
+}
+
+impl<B: Backend> Clone for ShakespeareStreamDataLoader<B> {
+    fn clone(&self) -> Self {
+        Self {
+            dataset: Arc::clone(&self.dataset),
+            split: self.split,
+            device: self.device.clone(),
+            steps_per_epoch: self.steps_per_epoch,
+            total_steps: self.total_steps,
+            consumed_steps: self.consumed_steps.as_ref().map(Arc::clone),
+            positions: Arc::clone(&self.positions),
+            tokens_since_reset: Arc::clone(&self.tokens_since_reset),
+            pending_reset: Arc::clone(&self.pending_reset),
+            rng: Arc::clone(&self.rng),
+            initialized: Arc::clone(&self.initialized),
+            context_window: self.context_window,
+        }
+    }
+}
+
+impl<B: Backend> ShakespeareStreamDataLoader<B> {
+    pub fn new(
+        dataset: Arc<ShakespeareDataset>,
+        split: ShakespeareSplit,
+        device: &B::Device,
+        steps_per_epoch: usize,
+        total_steps: Option<usize>,
+        strategy: ContextStrategy,
+    ) -> Self {
+        let steps_per_epoch = steps_per_epoch.max(1);
+        let total_steps = total_steps.filter(|value| *value > 0);
+        let consumed_steps = total_steps.as_ref().map(|_| Arc::new(AtomicUsize::new(0)));
+        let batch_size = dataset.batch_size;
+        let block_size = dataset.block_size;
+        let positions = Arc::new(Mutex::new(vec![0; batch_size]));
+        let tokens_since_reset = Arc::new(Mutex::new(vec![0; batch_size]));
+        let pending_reset = Arc::new(Mutex::new(vec![true; batch_size]));
+        let rng = Arc::new(Mutex::new(StdRng::seed_from_u64(0xBAD5EED)));
+        let initialized = Arc::new(AtomicBool::new(false));
+        let context_window = match strategy {
+            ContextStrategy::Infinite => None,
+            ContextStrategy::Sliding { window } => Some(window.max(block_size).max(1)),
+        };
+
+        Self {
+            dataset,
+            split,
+            device: device.clone(),
+            steps_per_epoch,
+            total_steps,
+            consumed_steps,
+            positions,
+            tokens_since_reset,
+            pending_reset,
+            rng,
+            initialized,
+            context_window,
+        }
+    }
+}
+
+impl<B> DataLoader<B, ShakespeareBatch<B>> for ShakespeareStreamDataLoader<B>
+where
+    B: Backend + 'static,
+    B::Device: Clone,
+{
+    fn iter<'a>(&'a self) -> Box<dyn DataLoaderIterator<ShakespeareBatch<B>> + 'a> {
+        let steps_total =
+            if let (Some(limit), Some(consumed)) = (self.total_steps, &self.consumed_steps) {
+                let used = consumed.load(Ordering::Relaxed);
+                if used >= limit {
+                    0
+                } else {
+                    (limit - used).min(self.steps_per_epoch)
+                }
+            } else {
+                self.steps_per_epoch
+            };
+
+        Box::new(ShakespeareStreamIterator {
+            dataset: Arc::clone(&self.dataset),
+            split: self.split,
+            device: self.device.clone(),
+            steps_total,
+            step: 0,
+            total_steps: self.total_steps,
+            consumed_steps: self.consumed_steps.clone(),
+            positions: Arc::clone(&self.positions),
+            tokens_since_reset: Arc::clone(&self.tokens_since_reset),
+            pending_reset: Arc::clone(&self.pending_reset),
+            rng: Arc::clone(&self.rng),
+            initialized: Arc::clone(&self.initialized),
+            context_window: self.context_window,
+        })
+    }
+
+    fn num_items(&self) -> usize {
+        self.steps_per_epoch * self.dataset.batch_size()
+    }
+
+    fn to_device(&self, device: &B::Device) -> Arc<dyn DataLoader<B, ShakespeareBatch<B>>> {
+        Arc::new(Self {
+            dataset: Arc::clone(&self.dataset),
+            split: self.split,
+            device: device.clone(),
+            steps_per_epoch: self.steps_per_epoch,
+            total_steps: self.total_steps,
+            consumed_steps: self.consumed_steps.as_ref().map(Arc::clone),
+            positions: Arc::clone(&self.positions),
+            tokens_since_reset: Arc::clone(&self.tokens_since_reset),
+            pending_reset: Arc::clone(&self.pending_reset),
+            rng: Arc::clone(&self.rng),
+            initialized: Arc::clone(&self.initialized),
+            context_window: self.context_window,
+        })
+    }
+
+    fn slice(&self, start: usize, end: usize) -> Arc<dyn DataLoader<B, ShakespeareBatch<B>>> {
+        let end = end.min(self.steps_per_epoch);
+        let start = start.min(end);
+        let steps = (end - start).max(1);
+
+        Arc::new(Self {
+            dataset: Arc::clone(&self.dataset),
+            split: self.split,
+            device: self.device.clone(),
+            steps_per_epoch: steps,
+            total_steps: self.total_steps,
+            consumed_steps: self.consumed_steps.as_ref().map(Arc::clone),
+            positions: Arc::clone(&self.positions),
+            tokens_since_reset: Arc::clone(&self.tokens_since_reset),
+            pending_reset: Arc::clone(&self.pending_reset),
+            rng: Arc::clone(&self.rng),
+            initialized: Arc::clone(&self.initialized),
+            context_window: self.context_window,
+        })
+    }
+}
+
+struct ShakespeareStreamIterator<B: Backend> {
+    dataset: Arc<ShakespeareDataset>,
+    split: ShakespeareSplit,
+    device: B::Device,
+    steps_total: usize,
+    step: usize,
+    total_steps: Option<usize>,
+    consumed_steps: Option<Arc<AtomicUsize>>,
+    positions: Arc<Mutex<Vec<usize>>>,
+    tokens_since_reset: Arc<Mutex<Vec<usize>>>,
+    pending_reset: Arc<Mutex<Vec<bool>>>,
+    rng: Arc<Mutex<StdRng>>,
+    initialized: Arc<AtomicBool>,
+    context_window: Option<usize>,
+}
+
+impl<B: Backend> Iterator for ShakespeareStreamIterator<B> {
+    type Item = ShakespeareBatch<B>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.step >= self.steps_total {
+            return None;
+        }
+        self.step += 1;
+
+        if let Some(counter) = &self.consumed_steps {
+            if let Some(limit) = self.total_steps {
+                let previous = counter.fetch_add(1, Ordering::Relaxed);
+                if previous >= limit {
+                    return None;
+                }
+            } else {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let batch_size = self.dataset.batch_size;
+        let block_size = self.dataset.block_size;
+        let (offset, span) = self.dataset.split_offset_and_span(self.split);
+
+        {
+            if !self.initialized.swap(true, Ordering::Relaxed) {
+                let mut positions = self.positions.lock().expect("positions poisoned");
+                let mut tokens_since_reset = self
+                    .tokens_since_reset
+                    .lock()
+                    .expect("tokens_since_reset poisoned");
+                let mut pending_reset = self.pending_reset.lock().expect("pending_reset poisoned");
+
+                let stream_span = span.saturating_sub(block_size + 1);
+                let stride = (stream_span / batch_size.max(1)).max(1);
+                for (idx, pos) in positions.iter_mut().enumerate() {
+                    let start_offset = (idx * stride).min(stream_span);
+                    *pos = offset + start_offset;
+                }
+                for token_count in tokens_since_reset.iter_mut() {
+                    *token_count = 0;
+                }
+                pending_reset.fill(true);
+            }
+        }
+
+        let mut positions = self.positions.lock().expect("positions poisoned");
+        let mut tokens_since_reset = self
+            .tokens_since_reset
+            .lock()
+            .expect("tokens_since_reset poisoned");
+        let mut pending_reset = self.pending_reset.lock().expect("pending_reset poisoned");
+        let mut rng = self.rng.lock().expect("rng poisoned");
+
+        let mut inputs = Vec::with_capacity(batch_size * block_size);
+        let mut targets = Vec::with_capacity(batch_size * block_size);
+        let mut resets = Vec::with_capacity(batch_size);
+        let mut stream_ids = Vec::with_capacity(batch_size);
+
+        for stream_idx in 0..batch_size {
+            let mut reset_flag = pending_reset[stream_idx];
+            if let Some(window) = self.context_window {
+                if window > 0 && tokens_since_reset[stream_idx] >= window {
+                    reset_flag = true;
+                    tokens_since_reset[stream_idx] = 0;
+                }
+            }
+
+            let start = positions[stream_idx];
+            let end = start + block_size;
+
+            for t in 0..block_size {
+                let data_idx = start + t;
+                inputs.push(self.dataset.tokens[data_idx] as i64);
+                targets.push(self.dataset.tokens[data_idx + 1] as i64);
+            }
+
+            positions[stream_idx] = end;
+            tokens_since_reset[stream_idx] += block_size;
+
+            let limit = offset + span - (block_size + 1);
+            let mut next_reset = false;
+            if positions[stream_idx] > limit {
+                let new_start = rng.gen_range(offset..=limit);
+                positions[stream_idx] = new_start;
+                tokens_since_reset[stream_idx] = 0;
+                next_reset = true;
+            } else if let Some(window) = self.context_window {
+                if window > 0 && tokens_since_reset[stream_idx] >= window {
+                    tokens_since_reset[stream_idx] = 0;
+                    next_reset = true;
+                }
+            }
+
+            pending_reset[stream_idx] = next_reset;
+            resets.push(reset_flag);
+            stream_ids.push(stream_idx);
+        }
+
+        let inputs_tensor = Tensor::<B, 2, Int>::from_data(
+            TensorData::new(inputs, [batch_size, block_size]),
+            &self.device,
+        );
+        let targets_tensor = Tensor::<B, 2, Int>::from_data(
+            TensorData::new(targets, [batch_size, block_size]),
+            &self.device,
+        );
+
+        Some(ShakespeareBatch::new(
+            inputs_tensor,
+            targets_tensor,
+            resets,
+            stream_ids,
+        ))
+    }
+}
+
+impl<B: Backend> DataLoaderIterator<ShakespeareBatch<B>> for ShakespeareStreamIterator<B> {
     fn progress(&self) -> Progress {
         Progress::new(
             self.step * self.dataset.batch_size(),

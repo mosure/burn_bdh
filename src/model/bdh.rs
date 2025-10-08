@@ -1,14 +1,18 @@
-use burn::module::{Module, Param};
+use burn::module::{
+    AutodiffModule, Content, Module, ModuleMapper, ModuleVisitor, ModuleDisplay, ModuleDisplayDefault, Param, Devices,
+};
 use burn::nn::{Dropout, DropoutConfig, Embedding, EmbeddingConfig};
-use burn::tensor::backend::Backend;
+use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::{Distribution as TensorDistribution, Int, Tensor, TensorData, activation};
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::prelude::*;
+use std::cell::{RefCell, RefMut};
 use std::cmp::Ordering;
 
 use crate::kernel::{BlockPattern1d, relu_lowrank};
+use crate::ContextStrategy;
 
-use super::attention::Attention;
+use super::attention::{Attention, AttentionCache};
 use super::config::{BDHConfig, FusedKernelConfig};
 use super::state::ModelState;
 
@@ -29,6 +33,8 @@ pub struct BDH<B: Backend> {
     encoder_v: Param<Tensor<B, 3>>,
     decoder: Param<Tensor<B, 2>>,
     lm_head: Param<Tensor<B, 2>>,
+    #[module(skip)]
+    tbptt: TbpttHandle<B>,
 }
 
 impl<B: Backend> BDH<B> {
@@ -78,7 +84,58 @@ impl<B: Backend> BDH<B> {
             encoder_v,
             decoder,
             lm_head,
+            tbptt: TbpttHandle::default(),
         }
+    }
+
+    pub fn configure_tbptt(
+        &self,
+        strategy: ContextStrategy,
+        batch_size: usize,
+        block_size: usize,
+    ) {
+        self.tbptt
+            .borrow_mut()
+            .replace(TbpttRuntime::new(strategy, batch_size, self.n_layer, block_size));
+    }
+
+    pub fn disable_tbptt(&self) {
+        self.tbptt.borrow_mut().take();
+    }
+
+    pub fn forward_tbptt(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        resets: &[bool],
+        stream_ids: &[usize],
+    ) -> Option<Tensor<B, 3>>
+    where
+        B: burn::tensor::backend::AutodiffBackend,
+    {
+        let mut guard = self.tbptt.borrow_mut();
+        let runtime = guard.as_mut()?;
+
+        let [batch_size, _] = tokens.shape().dims::<2>();
+        if resets.len() != batch_size || stream_ids.len() != batch_size {
+            return None;
+        }
+
+        if let Some(max_stream) = stream_ids.iter().copied().max() {
+            runtime.ensure_capacity(max_stream + 1);
+        }
+
+        for (idx, &reset) in resets.iter().enumerate() {
+            if reset {
+                runtime.reset_stream(stream_ids[idx]);
+            }
+        }
+
+        let logits = self.forward_with_state_streams(tokens, runtime.state_mut(), stream_ids);
+
+        runtime.apply_strategy(stream_ids);
+        runtime.detach();
+
+        Some(logits)
     }
 
     fn layer_norm<const D: usize>(&self, tensor: Tensor<B, D>) -> Tensor<B, D> {
@@ -246,7 +303,28 @@ impl<B: Backend> BDH<B> {
         tokens: Tensor<B, 2, Int>,
         state: &mut ModelState<B>,
     ) -> Tensor<B, 3> {
+        let [batch_size, _] = tokens.shape().dims::<2>();
+        let stream_ids: Vec<usize> = (0..batch_size).collect();
+        self.forward_with_state_streams(tokens, state, &stream_ids)
+    }
+
+    fn forward_with_state_streams(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        state: &mut ModelState<B>,
+        stream_ids: &[usize],
+    ) -> Tensor<B, 3> {
         assert_eq!(state.layers.len(), self.n_layer, "model state layers mismatch");
+        assert_eq!(
+            tokens.shape().dims::<2>()[0],
+            stream_ids.len(),
+            "stream id count must match batch size"
+        );
+
+        if let Some(max_stream) = stream_ids.iter().copied().max() {
+            state.ensure_capacity(max_stream + 1);
+        }
+
         let mut current = self.embed.forward(tokens).unsqueeze_dim::<4>(1);
         current = self.layer_norm(current);
 
@@ -273,10 +351,11 @@ impl<B: Backend> BDH<B> {
                 activation::relu(x_latent)
             };
 
-            let attn = self.attention.forward_cached(
+            let attn = self.forward_attention_streams(
                 x_sparse.clone(),
                 current.clone(),
                 &mut layer_state.attention,
+                stream_ids,
             );
             let attn = self.layer_norm(attn);
 
@@ -311,12 +390,132 @@ impl<B: Backend> BDH<B> {
             current = self.layer_norm(current + mlp_out);
         }
 
-        state.position += current.shape().dims::<4>()[2];
-
         let [batch, _, time, dim] = current.shape().dims();
         current
             .reshape([batch * time, dim])
             .matmul(self.lm_head.val())
             .reshape([batch, time, self.vocab_size])
+    }
+
+    fn forward_attention_streams(
+        &self,
+        query: Tensor<B, 4>,
+        value: Tensor<B, 4>,
+        cache: &mut AttentionCache<B>,
+        stream_ids: &[usize],
+    ) -> Tensor<B, 4> {
+        cache.forward_batch(&self.attention, query, value, stream_ids)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct TbpttHandle<B: Backend> {
+    inner: RefCell<Option<TbpttRuntime<B>>>,
+}
+
+impl<B: Backend> TbpttHandle<B> {
+    fn borrow_mut(&self) -> RefMut<'_, Option<TbpttRuntime<B>>> {
+        self.inner.borrow_mut()
+    }
+}
+
+impl<B: Backend> Module<B> for TbpttHandle<B> {
+    type Record = ();
+
+    fn collect_devices(&self, devices: Devices<B>) -> Devices<B> {
+        devices
+    }
+
+    fn fork(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn to_device(self, _device: &B::Device) -> Self {
+        self
+    }
+
+    fn visit<Visitor: ModuleVisitor<B>>(&self, _visitor: &mut Visitor) {}
+
+    fn map<Mapper: ModuleMapper<B>>(self, _mapper: &mut Mapper) -> Self {
+        self
+    }
+
+    fn load_record(self, _record: Self::Record) -> Self {
+        self
+    }
+
+    fn into_record(self) -> Self::Record {
+        ()
+    }
+}
+
+impl<B: AutodiffBackend> AutodiffModule<B> for TbpttHandle<B> {
+    type InnerModule = TbpttHandle<B::InnerBackend>;
+
+    fn valid(&self) -> Self::InnerModule {
+        TbpttHandle::default()
+    }
+}
+
+impl<B: Backend> ModuleDisplayDefault for TbpttHandle<B> {
+    fn content(&self, content: Content) -> Option<Content> {
+        Some(content)
+    }
+}
+
+impl<B: Backend> ModuleDisplay for TbpttHandle<B> {}
+
+#[derive(Debug, Clone)]
+struct TbpttRuntime<B: Backend> {
+    state: ModelState<B>,
+    strategy: ContextStrategy,
+    block_size: usize,
+}
+
+impl<B: Backend> TbpttRuntime<B> {
+    fn new(
+        strategy: ContextStrategy,
+        initial_streams: usize,
+        num_layers: usize,
+        block_size: usize,
+    ) -> Self {
+        let mut state = ModelState::new(num_layers);
+        if initial_streams > 0 {
+            state.ensure_capacity(initial_streams);
+        }
+        Self {
+            state,
+            strategy,
+            block_size,
+        }
+    }
+
+    fn ensure_capacity(&mut self, capacity: usize) {
+        self.state.ensure_capacity(capacity);
+    }
+
+    fn reset_stream(&mut self, stream: usize) {
+        self.state.reset_stream(stream);
+    }
+
+    fn state_mut(&mut self) -> &mut ModelState<B> {
+        &mut self.state
+    }
+
+    fn detach(&mut self)
+    where
+        B: burn::tensor::backend::AutodiffBackend,
+    {
+        self.state.detach();
+    }
+
+    fn apply_strategy(&mut self, stream_ids: &[usize]) {
+        match self.strategy {
+            ContextStrategy::Infinite => {}
+            ContextStrategy::Sliding { window } => {
+                let limit = window.max(self.block_size).max(1);
+                self.state.trim_streams(stream_ids, limit);
+            }
+        }
     }
 }

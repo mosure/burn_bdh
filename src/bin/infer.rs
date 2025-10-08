@@ -9,8 +9,8 @@ use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
 use burn::tensor::backend::Backend;
 use burn_dragon_hatchling::wgpu::init_runtime;
 use burn_dragon_hatchling::{
-    generate_text, BDH, BDHConfig, GenerationConfig, ModelOverrides, TrainingConfig,
-    load_training_config,
+    generate_text, ContextStrategyConfig, BDH, BDHConfig, GenerationConfig, ModelOverrides,
+    TrainingConfig, load_training_config,
 };
 use burn_wgpu::Wgpu;
 
@@ -102,7 +102,7 @@ where
     model = model.load_record(record);
 
     let mut generation = config.generation.clone();
-    apply_generation_overrides(&mut generation, args);
+    apply_generation_overrides(&mut generation, args, config.training.block_size);
 
     let output = generate_text::<B>(
         &model,
@@ -157,7 +157,11 @@ fn build_model_config(overrides: &ModelOverrides) -> BDHConfig {
     model_config
 }
 
-fn apply_generation_overrides(generation: &mut GenerationConfig, args: &Args) {
+fn apply_generation_overrides(
+    generation: &mut GenerationConfig,
+    args: &Args,
+    block_size: usize,
+) {
     if let Some(prompt) = &args.prompt {
         generation.prompt = prompt.clone();
     }
@@ -169,6 +173,14 @@ fn apply_generation_overrides(generation: &mut GenerationConfig, args: &Args) {
     }
     if let Some(top_k) = args.top_k {
         generation.top_k = Some(top_k);
+    }
+    if let Some(mode) = args.context_mode {
+        generation.context_strategy = match mode {
+            ContextModeArg::Infinite => ContextStrategyConfig::Infinite,
+            ContextModeArg::Sliding => ContextStrategyConfig::Sliding {
+                window: args.context_window.unwrap_or(block_size).max(1),
+            },
+        };
     }
 }
 
@@ -298,10 +310,22 @@ struct Args {
     /// Override the top-k sampling parameter.
     #[arg(long, value_name = "K")]
     top_k: Option<usize>,
+    /// Override the context strategy.
+    #[arg(long, value_enum)]
+    context_mode: Option<ContextModeArg>,
+    /// Sliding window size when using `--context-mode=sliding`.
+    #[arg(long, value_name = "N")]
+    context_window: Option<usize>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum BackendArg {
     Wgpu,
     Cuda,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum ContextModeArg {
+    Infinite,
+    Sliding,
 }

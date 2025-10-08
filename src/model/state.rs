@@ -1,4 +1,4 @@
-use burn::tensor::backend::Backend;
+use burn::tensor::backend::{AutodiffBackend, Backend};
 
 use super::attention::AttentionCache;
 
@@ -10,7 +10,6 @@ pub struct LayerState<B: Backend> {
 #[derive(Debug, Clone)]
 pub struct ModelState<B: Backend> {
     pub layers: Vec<LayerState<B>>,
-    pub position: usize,
 }
 
 impl<B: Backend> ModelState<B> {
@@ -21,14 +20,44 @@ impl<B: Backend> ModelState<B> {
                     attention: AttentionCache::new(),
                 })
                 .collect(),
-            position: 0,
         }
     }
 
     pub fn reset(&mut self) {
         for layer in &mut self.layers {
-            layer.attention = AttentionCache::new();
+            layer.attention.reset_all();
         }
-        self.position = 0;
+    }
+
+    pub fn ensure_capacity(&mut self, capacity: usize) {
+        for layer in &mut self.layers {
+            layer.attention.ensure_streams(capacity);
+        }
+    }
+
+    pub fn reset_stream(&mut self, stream: usize) {
+        for layer in &mut self.layers {
+            layer.attention.reset_stream(stream);
+        }
+    }
+
+    pub fn trim_stream(&mut self, stream: usize, max_len: usize) {
+        for layer in &mut self.layers {
+            layer.attention.trim_stream(stream, max_len);
+        }
+    }
+
+    pub fn trim_streams(&mut self, streams: &[usize], max_len: usize) {
+        for &stream in streams {
+            self.trim_stream(stream, max_len);
+        }
+    }
+}
+
+impl<B: AutodiffBackend> ModelState<B> {
+    pub fn detach(&mut self) {
+        for layer in &mut self.layers {
+            layer.attention.detach();
+        }
     }
 }

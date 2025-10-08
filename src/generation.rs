@@ -5,8 +5,15 @@ use rand::distributions::WeightedIndex;
 use rand::prelude::*;
 use std::cmp::Ordering;
 
+use crate::config::ContextStrategyConfig;
 use crate::tokenizer::Tokenizer;
 use crate::{BDH, GenerationConfig, TrainingHyperparameters, ModelState};
+
+#[derive(Clone, Copy, Debug)]
+pub enum ContextStrategy {
+    Infinite,
+    Sliding { window: usize },
+}
 
 pub fn prefill_state<B: Backend>(
     model: &BDH<B>,
@@ -113,25 +120,20 @@ pub fn generate_tokens<B: Backend>(
     max_new_tokens: usize,
     temperature: f32,
     top_k: Option<usize>,
-    context_limit: Option<usize>,
+    strategy: ContextStrategy,
 ) -> Result<Vec<i64>> {
-    let mut context_tokens = prompt_tokens.clone();
     let mut full_tokens = prompt_tokens;
-    let (mut state, mut last_logits) = prefill_state(model, &context_tokens, device)?;
+    let (mut state, mut last_logits) = prefill_state(model, &full_tokens, device)?;
 
     for _ in 0..max_new_tokens {
         let (next, logits) =
             sample_next_token(model, &mut state, last_logits, temperature, top_k, device)?;
         full_tokens.push(next);
-        context_tokens.push(next);
         last_logits = logits;
 
-        if let Some(limit) = context_limit {
-            if context_tokens.len() > limit {
-                context_tokens = context_tokens[context_tokens.len() - limit..].to_vec();
-                let (new_state, new_logits) = prefill_state(model, &context_tokens, device)?;
-                state = new_state;
-                last_logits = new_logits;
+        if let ContextStrategy::Sliding { window } = strategy {
+            if window > 0 {
+                state.trim_stream(0, window);
             }
         }
     }
@@ -146,9 +148,12 @@ pub fn generate_text<B: Backend>(
     training: &TrainingHyperparameters,
     generation: &GenerationConfig,
 ) -> Result<String> {
+    let strategy = resolve_context_strategy(&generation.context_strategy, training.block_size);
     let mut prompt_ids = tokenizer.encode(&generation.prompt, false, false);
-    if prompt_ids.len() > training.block_size {
-        prompt_ids = prompt_ids[prompt_ids.len() - training.block_size..].to_vec();
+    if let ContextStrategy::Sliding { window } = strategy {
+        if prompt_ids.len() > window {
+            prompt_ids = prompt_ids[prompt_ids.len() - window..].to_vec();
+        }
     }
 
     let prompt_tokens: Vec<i64> = prompt_ids.iter().map(|&id| id as i64).collect();
@@ -159,7 +164,7 @@ pub fn generate_text<B: Backend>(
         generation.max_tokens,
         generation.temperature,
         generation.top_k,
-        Some(training.block_size),
+        strategy,
     )?;
 
     let decoded_ids: Vec<u32> = tokens_all
@@ -168,4 +173,14 @@ pub fn generate_text<B: Backend>(
         .collect();
 
     Ok(tokenizer.decode(&decoded_ids))
+}
+
+fn resolve_context_strategy(config: &ContextStrategyConfig, default_window: usize) -> ContextStrategy {
+    match config {
+        ContextStrategyConfig::Infinite => ContextStrategy::Infinite,
+        ContextStrategyConfig::Sliding { window } => {
+            let win = if *window == 0 { default_window.max(1) } else { *window };
+            ContextStrategy::Sliding { window: win }
+        }
+    }
 }

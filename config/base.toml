@@ -12,6 +12,7 @@ block_size = 512
 batch_size = 16
 max_iters = 3000
 log_frequency = 100
+context_strategy = { type = "infinite" }
 
 [optimizer]
 learning_rate = 0.001
@@ -27,6 +28,7 @@ prompt = "To be or "
 max_tokens = 128
 temperature = 1.0
 top_k = 3
+# context_strategy = { type = "infinite" } # alternative: { type = "sliding", window = 512 }
 
 [model]
 n_layer = 6
