@@ -169,7 +169,13 @@ where
             top_k: generation.top_k,
             strategy,
         };
-        generate_tokens::<B>(&model, prompt_tokens, &device, settings, Some(&mut callback))?;
+        generate_tokens::<B>(
+            &model,
+            prompt_tokens,
+            &device,
+            settings,
+            Some(&mut callback),
+        )?;
 
         if let Some(err) = stream_err {
             return Err(err);

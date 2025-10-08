@@ -32,6 +32,8 @@ burn inference and training of [dragon hatchling](https://arxiv.org/abs/2509.265
 - [ ] temporal neuron dampening
 
 
+Dataset configuration (built-in presets and Hugging Face examples) is documented inline in `config/base.toml`.
+
 ## training
 
 - `cargo run --release` (defaults to the cuda backend)

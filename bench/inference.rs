@@ -99,28 +99,17 @@ fn run_inference_backend<B, Init, Skip>(
             top_k: None,
             strategy: BENCH_CONTEXT,
         };
-        generate_tokens(
-            &model,
-            prompt_tokens.clone(),
-            &device,
-            settings,
-            None,
-        )
-        .expect("warm-up tokens");
+        generate_tokens(&model, prompt_tokens.clone(), &device, settings, None)
+            .expect("warm-up tokens");
 
         log_theoretical_profile(&model_config, cfg);
 
         group.throughput(Throughput::Elements(cfg.batch as u64));
         group.bench_with_input(BenchmarkId::from_parameter(cfg.name), cfg, |b, _| {
             b.iter(|| {
-                let generated = generate_tokens(
-                    &model,
-                    prompt_tokens.clone(),
-                    &device,
-                    settings,
-                    None,
-                )
-                .expect("generate tokens");
+                let generated =
+                    generate_tokens(&model, prompt_tokens.clone(), &device, settings, None)
+                        .expect("generate tokens");
                 black_box(generated);
             });
         });

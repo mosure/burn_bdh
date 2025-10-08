@@ -42,6 +42,8 @@ cuda = ["burn/cuda", "burn-cuda"]
 toml = "0.9"
 rand = "0.8"
 ureq = { version = "2.9", features = ["tls"] }
+hf-hub = { version = "0.4", default-features = false, features = ["ureq"] }
+parquet = "53"
 burn-ndarray = "0.18"
 burn-autodiff = "0.18"
 serde = { version = "1.0", features = ["derive"] }

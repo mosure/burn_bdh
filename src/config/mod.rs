@@ -12,8 +12,79 @@ pub struct DatasetConfig {
     pub cache_dir: PathBuf,
     #[serde(default = "default_train_split_ratio")]
     pub train_split_ratio: f32,
+    #[serde(flatten)]
+    pub source: DatasetSourceConfig,
     #[serde(default)]
     pub tokenizer: TokenizerConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DatasetSourceConfig {
+    Shakespeare {
+        #[serde(default)]
+        url: Option<String>,
+    },
+    HuggingFace(HuggingFaceDatasetConfig),
+    DeepMath {
+        #[serde(default)]
+        revision: Option<String>,
+        #[serde(default)]
+        max_records: Option<usize>,
+    },
+    TinyChat {
+        #[serde(default)]
+        revision: Option<String>,
+        #[serde(default)]
+        max_records: Option<usize>,
+    },
+    WebscaleRl {
+        #[serde(default)]
+        revision: Option<String>,
+        #[serde(default)]
+        max_records: Option<usize>,
+    },
+}
+
+impl Default for DatasetSourceConfig {
+    fn default() -> Self {
+        Self::Shakespeare { url: None }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct HuggingFaceDatasetConfig {
+    pub repo_id: String,
+    #[serde(default)]
+    pub revision: Option<String>,
+    #[serde(default)]
+    pub format: HuggingFaceRecordFormat,
+    #[serde(default = "default_hf_train_files")]
+    pub train_files: Vec<String>,
+    #[serde(default)]
+    pub validation_files: Vec<String>,
+    #[serde(default = "default_hf_text_fields")]
+    pub text_fields: Vec<String>,
+    #[serde(default = "default_hf_field_separator")]
+    pub field_separator: String,
+    #[serde(default)]
+    pub template: Option<String>,
+    #[serde(default)]
+    pub max_records: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum HuggingFaceRecordFormat {
+    Jsonl,
+    Text,
+    Parquet,
+}
+
+impl Default for HuggingFaceRecordFormat {
+    fn default() -> Self {
+        Self::Jsonl
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -96,7 +167,9 @@ pub struct GenerationConfig {
 pub enum ContextStrategyConfig {
     #[default]
     Infinite,
-    Sliding { window: usize },
+    Sliding {
+        window: usize,
+    },
 }
 
 fn default_context_strategy() -> ContextStrategyConfig {
@@ -186,6 +259,18 @@ fn default_train_split_ratio() -> f32 {
     0.9
 }
 
+fn default_hf_train_files() -> Vec<String> {
+    vec!["train.jsonl".to_string()]
+}
+
+fn default_hf_text_fields() -> Vec<String> {
+    vec!["text".to_string()]
+}
+
+fn default_hf_field_separator() -> String {
+    "\n".to_string()
+}
+
 fn default_temperature() -> f32 {
     1.0
 }
@@ -218,6 +303,7 @@ mod tests {
             "[dataset]",
             "cache_dir = \"data\"",
             "train_split_ratio = 0.8",
+            "type = \"shakespeare\"",
             "",
             "[training]",
             "block_size = 256",
@@ -296,6 +382,10 @@ mod tests {
         );
         assert_eq!(config.dataset.tokenizer, TokenizerConfig::default());
         assert!((config.dataset.train_split_ratio - 0.8).abs() < f32::EPSILON);
+        assert_eq!(
+            config.dataset.source,
+            DatasetSourceConfig::Shakespeare { url: None }
+        );
         assert_eq!(config.generation.max_tokens, 64);
         assert_eq!(
             config.training.context_strategy,
@@ -329,5 +419,38 @@ mod tests {
             optimizer.lr_schedule,
             Some(LearningRateScheduleConfig::Constant { initial_lr: None })
         );
+    }
+
+    #[test]
+    fn huggingface_dataset_config_parses() {
+        let text = r#"
+            cache_dir = "data"
+            train_split_ratio = 0.75
+            type = "hugging_face"
+            repo_id = "AI-MO/DeepMath-103K"
+            revision = "main"
+            train_files = ["train.jsonl"]
+            validation_files = ["validation.jsonl"]
+            text_fields = ["problem", "solution"]
+            field_separator = "\n\n"
+            template = "{problem}\n{solution}"
+            max_records = 1000
+        "#;
+        let dataset: DatasetConfig = toml::from_str(text).expect("parse dataset config");
+        assert_eq!(dataset.train_split_ratio, 0.75);
+        match &dataset.source {
+            DatasetSourceConfig::HuggingFace(hf) => {
+                assert_eq!(hf.repo_id, "AI-MO/DeepMath-103K");
+                assert_eq!(hf.revision.as_deref(), Some("main"));
+                assert_eq!(hf.format, HuggingFaceRecordFormat::Jsonl);
+                assert_eq!(hf.train_files, vec!["train.jsonl"]);
+                assert_eq!(hf.validation_files, vec!["validation.jsonl"]);
+                assert_eq!(hf.text_fields, vec!["problem", "solution"]);
+                assert_eq!(hf.field_separator, "\n\n");
+                assert_eq!(hf.template.as_deref(), Some("{problem}\n{solution}"));
+                assert_eq!(hf.max_records, Some(1000));
+            }
+            other => panic!("unexpected dataset source: {other:?}"),
+        }
     }
 }

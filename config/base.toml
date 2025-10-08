@@ -1,8 +1,34 @@
+# dataset type presets:
+#   "shakespeare"  - tinyshakespeare character corpus
+#   "deep_math"    - AI-MO/DeepMath-103K (Problem/Solution pairs)
+#   "tiny_chat"    - starhopp3r/TinyChat BASIC-English conversations
+#   "webscale_rl"  - Salesforce/Webscale-RL parquet shards (RL QA data)
+#   "hugging_face" - arbitrary Hugging Face dataset (see example below)
+
 [dataset]
-cache_dir = "data"
+cache_dir = "data/tinychat"
 train_split_ratio = 0.9
+type = "tiny_chat"
+
+# example for a custom huggingface dataset override:
+#
+# [dataset]
+# cache_dir = "data"
+# train_split_ratio = 0.85
+# type = "hugging_face"
+# format = "jsonl"          # or "text" / "parquet"
+# repo_id = "AI-MO/DeepMath-103K"
+# revision = "main"         # optional ref (tag/branch/sha)
+# train_files = ["train.jsonl"]
+# validation_files = ["validation.jsonl"]
+# text_fields = ["problem", "solution"]
+# field_separator = "\n\n"
+# template = "Problem:\n{problem}\n\nSolution:\n{solution}"
+# max_records = 1024        # optional sampling cap for prototyping
+# authentication follows HF defaults (HF_TOKEN or huggingface-cli login)
 
 [dataset.tokenizer]
+# type accepts "char" (default) or "byte"
 type = "char"
 include_unknown = true
 vocab_path = "vocab.json"
@@ -18,6 +44,7 @@ learning_rate = 0.001
 weight_decay = 0.1
 
 [optimizer.lr_schedule]
+# type variants: "constant", "cosine", "linear", "exponential", "step", "noam"
 type = "cosine"
 min_lr = 0.00005
 num_iters = 3000

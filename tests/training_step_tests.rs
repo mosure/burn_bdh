@@ -38,10 +38,10 @@ fn single_training_step_executes() {
         .init::<Backend, BDH<Backend>>();
     let lr: LearningRate = 1e-3;
 
-    let (inputs, targets) = dataset.sample_batch::<Backend>(ShakespeareSplit::Train, &device);
+    let batch = dataset.sample_batch::<Backend>(ShakespeareSplit::Train, &device);
 
-    let logits = model.forward(inputs);
-    let loss = language_model_loss::<Backend>(logits, targets);
+    let logits = model.forward(batch.inputs.clone());
+    let loss = language_model_loss::<Backend>(logits, batch.targets.clone());
     let loss_scalar = loss
         .clone()
         .to_data()

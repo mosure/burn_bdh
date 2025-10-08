@@ -24,9 +24,9 @@ fn dataset_batches_match_expected_shape() {
     <Backend as BackendTrait>::seed(0);
     let device = <Backend as BackendTrait>::Device::default();
 
-    let (inputs, targets) = dataset.sample_batch::<Backend>(ShakespeareSplit::Train, &device);
-    assert_eq!(inputs.shape().dims(), [batch_size, block_size]);
-    assert_eq!(targets.shape().dims(), [batch_size, block_size]);
+    let batch = dataset.sample_batch::<Backend>(ShakespeareSplit::Train, &device);
+    assert_eq!(batch.inputs.shape().dims(), [batch_size, block_size]);
+    assert_eq!(batch.targets.shape().dims(), [batch_size, block_size]);
 }
 
 #[test]

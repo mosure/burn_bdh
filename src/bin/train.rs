@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
 
 use burn::LearningRate;
@@ -34,10 +34,9 @@ use burn::record::{BinFileRecorder, FullPrecisionSettings};
 
 use burn_dragon_hatchling::wgpu::init_runtime;
 use burn_dragon_hatchling::{
-    BDH, BDHConfig, DatasetConfig, LearningRateScheduleConfig, ModelOverrides, OptimizerConfig,
-    ShakespeareBatch, ShakespeareDataset, ShakespeareRandomDataLoader, ShakespeareSplit,
-    TrainingConfig, TrainingHyperparameters, language_model_loss,
-    load_training_config,
+    BDH, BDHConfig, Dataset, DatasetConfig, DatasetSplit, LearningRateScheduleConfig,
+    ModelOverrides, OptimizerConfig, RandomDataLoader, SequenceBatch, TrainingConfig,
+    TrainingHyperparameters, build_dataset, language_model_loss, load_training_config,
 };
 
 #[derive(Parser, Debug)]
@@ -116,8 +115,8 @@ impl<B: AutodiffBackend> ItemLazy for LanguageModelTrainItem<B> {
 
 type ValidBackend<B> = <B as AutodiffBackend>::InnerBackend;
 
-impl<B: AutodiffBackend> TrainStep<ShakespeareBatch<B>, LanguageModelTrainItem<B>> for BDH<B> {
-    fn step(&self, batch: ShakespeareBatch<B>) -> TrainOutput<LanguageModelTrainItem<B>> {
+impl<B: AutodiffBackend> TrainStep<SequenceBatch<B>, LanguageModelTrainItem<B>> for BDH<B> {
+    fn step(&self, batch: SequenceBatch<B>) -> TrainOutput<LanguageModelTrainItem<B>> {
         let logits = self.forward(batch.inputs);
         let loss = language_model_loss::<B>(logits, batch.targets);
         let grads = loss.backward();
@@ -126,8 +125,8 @@ impl<B: AutodiffBackend> TrainStep<ShakespeareBatch<B>, LanguageModelTrainItem<B
     }
 }
 
-impl<B: BackendTrait> ValidStep<ShakespeareBatch<B>, LanguageModelOutput<B>> for BDH<B> {
-    fn step(&self, batch: ShakespeareBatch<B>) -> LanguageModelOutput<B> {
+impl<B: BackendTrait> ValidStep<SequenceBatch<B>, LanguageModelOutput<B>> for BDH<B> {
+    fn step(&self, batch: SequenceBatch<B>) -> LanguageModelOutput<B> {
         let logits = self.forward(batch.inputs);
         let loss = language_model_loss::<B>(logits, batch.targets);
         LanguageModelOutput::new(loss)
@@ -153,7 +152,7 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
-    let dataset = Arc::new(prepare_dataset(&config.dataset, &config.training)?);
+    let dataset = prepare_dataset(&config.dataset, &config.training)?;
 
     match args.train.backend {
         BackendArg::Wgpu => train_backend::<Autodiff<Wgpu<f32>>, _>(
@@ -179,7 +178,7 @@ fn run() -> Result<()> {
 
 fn train_backend<B, Init>(
     config: &TrainingConfig,
-    dataset: Arc<ShakespeareDataset>,
+    dataset: Arc<Dataset>,
     backend_name: &str,
     init_backend: Init,
 ) -> Result<()>
@@ -199,32 +198,31 @@ where
     let tokenizer = dataset.tokenizer();
     model_config.vocab_size = tokenizer.len();
 
-    let steps_per_epoch = dataset.steps_per_epoch(ShakespeareSplit::Train);
+    let steps_per_epoch = dataset.steps_per_epoch(DatasetSplit::Train);
     let total_steps = training.max_iters.max(1);
     let total_epochs = usize::max(1, total_steps.div_ceil(steps_per_epoch));
 
     info!(
         "train schedule: steps_per_epoch={steps_per_epoch}, total_steps={total_steps}, epochs={total_epochs}"
     );
-
-    let train_loader: Arc<dyn DataLoader<B, ShakespeareBatch<B>>> =
-        Arc::new(ShakespeareRandomDataLoader::<B>::new(
+    let train_loader: Arc<dyn DataLoader<B, SequenceBatch<B>>> =
+        Arc::new(RandomDataLoader::<B>::new(
             Arc::clone(&dataset),
-            ShakespeareSplit::Train,
+            DatasetSplit::Train,
             &device,
             steps_per_epoch,
             Some(total_steps),
         ));
 
-    let val_steps_per_epoch = dataset.steps_per_epoch(ShakespeareSplit::Val);
+    let val_steps_per_epoch = dataset.steps_per_epoch(DatasetSplit::Val);
     let desired_valid_steps = usize::max(1, total_steps / training.log_frequency.max(1));
     let valid_steps = desired_valid_steps.min(val_steps_per_epoch).max(1);
 
     let valid_device = device.clone();
-    let valid_loader: Arc<dyn DataLoader<ValidBackend<B>, ShakespeareBatch<ValidBackend<B>>>> =
-        Arc::new(ShakespeareRandomDataLoader::<ValidBackend<B>>::new(
+    let valid_loader: Arc<dyn DataLoader<ValidBackend<B>, SequenceBatch<ValidBackend<B>>>> =
+        Arc::new(RandomDataLoader::<ValidBackend<B>>::new(
             Arc::clone(&dataset),
-            ShakespeareSplit::Val,
+            DatasetSplit::Val,
             &valid_device,
             valid_steps,
             None,
@@ -312,8 +310,8 @@ where
     training: &'a TrainingHyperparameters,
     model_config: &'a BDHConfig,
     device: &'a B::Device,
-    train_loader: Arc<dyn DataLoader<B, ShakespeareBatch<B>>>,
-    valid_loader: Arc<dyn DataLoader<ValidBackend<B>, ShakespeareBatch<ValidBackend<B>>>>,
+    train_loader: Arc<dyn DataLoader<B, SequenceBatch<B>>>,
+    valid_loader: Arc<dyn DataLoader<ValidBackend<B>, SequenceBatch<ValidBackend<B>>>>,
     epochs: usize,
 }
 
@@ -447,21 +445,15 @@ fn build_vocab_only(config: &TrainingConfig) -> Result<()> {
 fn prepare_dataset(
     dataset_cfg: &DatasetConfig,
     training: &TrainingHyperparameters,
-) -> Result<ShakespeareDataset> {
+) -> Result<Arc<Dataset>> {
     let tokenizer_path = dataset_cfg.tokenizer.storage_path(&dataset_cfg.cache_dir);
     let tokenizer_preexists = tokenizer_path
         .as_ref()
         .map(|path| path.is_file())
         .unwrap_or(false);
 
-    let dataset = ShakespeareDataset::new(
-        &dataset_cfg.cache_dir,
-        training.block_size,
-        training.batch_size,
-        dataset_cfg.train_split_ratio,
-        &dataset_cfg.tokenizer,
-    )
-    .with_context(|| "failed to prepare Shakespeare dataset")?;
+    let (dataset_enum, dataset_summary) = build_dataset(dataset_cfg, training)?;
+    let dataset = Arc::new(dataset_enum);
 
     let tokenizer = dataset.tokenizer();
     match tokenizer_path {
@@ -483,6 +475,8 @@ fn prepare_dataset(
             tokenizer.len()
         ),
     };
+
+    info!("{dataset_summary}");
 
     Ok(dataset)
 }

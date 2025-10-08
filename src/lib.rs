@@ -13,7 +13,9 @@ pub use config::{
     ModelOverrides, OptimizerConfig, TrainingConfig, TrainingHyperparameters, load_training_config,
 };
 pub use dataset::{
-    ShakespeareBatch, ShakespeareDataset, ShakespeareRandomDataLoader, ShakespeareSplit,
+    Dataset, DatasetSplit, HuggingFaceDataset, RandomDataLoader, SequenceBatch, ShakespeareBatch,
+    ShakespeareDataset, ShakespeareRandomDataLoader, ShakespeareSplit, TokenSequenceDataset,
+    build_dataset,
 };
 pub use generation::{
     ContextStrategy, GenerationSettings, generate_text, generate_tokens, prefill_state,
