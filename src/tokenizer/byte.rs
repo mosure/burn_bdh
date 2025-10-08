@@ -40,20 +40,16 @@ impl ByteTokenizer {
 impl Tokenizer for ByteTokenizer {
     fn encode(&self, text: &str, add_bos: bool, add_eos: bool) -> Vec<u32> {
         let mut tokens = Vec::with_capacity(text.len() + 2);
-        if add_bos {
-            if let Some(bos) = self.bos {
-                tokens.push(bos);
-            }
+        if add_bos && let Some(bos) = self.bos {
+            tokens.push(bos);
         }
 
         for byte in text.as_bytes() {
             tokens.push(*byte as u32);
         }
 
-        if add_eos {
-            if let Some(eos) = self.eos {
-                tokens.push(eos);
-            }
+        if add_eos && let Some(eos) = self.eos {
+            tokens.push(eos);
         }
 
         tokens
@@ -77,6 +73,10 @@ impl Tokenizer for ByteTokenizer {
 
     fn len(&self) -> usize {
         self.vocab_size
+    }
+
+    fn is_empty(&self) -> bool {
+        self.vocab_size == 0
     }
 
     fn bos_id(&self) -> Option<u32> {

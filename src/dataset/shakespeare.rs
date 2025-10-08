@@ -55,25 +55,25 @@ impl ShakespeareDataset {
             if path.is_file() {
                 tokenizer_cfg
                     .load(&path)
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?
+                    .map_err(io::Error::other)?
             } else {
                 let tokenizer = tokenizer_cfg
                     .fit(std::iter::once(text.as_str()))
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+                    .map_err(io::Error::other)?;
                 tokenizer_cfg
                     .save(&*tokenizer, &path)
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+                    .map_err(io::Error::other)?;
                 tokenizer
             }
         } else {
             tokenizer_cfg
                 .fit(std::iter::once(text.as_str()))
-                .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?
+                .map_err(io::Error::other)?
         };
 
         tokenizer_cfg
             .validate_corpus(&*tokenizer, text.as_str())
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+            .map_err(io::Error::other)?;
 
         let tokens = tokenizer.encode(text.as_str(), false, false);
         if tokens.len() <= block_size + 1 {
@@ -169,7 +169,7 @@ impl ShakespeareDataset {
     pub fn decode(&self, tokens: &[i64]) -> String {
         let ids: Vec<u32> = tokens
             .iter()
-            .filter_map(|&tok| (tok >= 0).then(|| tok as u32))
+            .filter_map(|&tok| (tok >= 0).then_some(tok as u32))
             .collect();
         self.tokenizer.decode(&ids)
     }

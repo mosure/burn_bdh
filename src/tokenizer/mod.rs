@@ -13,6 +13,7 @@ pub trait Tokenizer: Send + Sync {
     fn encode(&self, text: &str, add_bos: bool, add_eos: bool) -> Vec<u32>;
     fn decode(&self, ids: &[u32]) -> String;
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool;
     fn bos_id(&self) -> Option<u32>;
     fn eos_id(&self) -> Option<u32>;
     fn pad_id(&self) -> Option<u32>;

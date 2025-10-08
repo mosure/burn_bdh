@@ -115,7 +115,7 @@ impl<B: Backend> Attention<B> {
                 query,
                 value,
                 self.freqs.clone(),
-                self.use_alibi.then(|| self.alibi_slopes.clone()),
+                self.use_alibi.then_some(self.alibi_slopes.clone()),
                 &self.block_pattern,
             );
         }

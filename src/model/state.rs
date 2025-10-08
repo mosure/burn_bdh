@@ -39,6 +39,10 @@ impl<B: Backend> ModelState<B> {
             .unwrap_or(0)
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn trim(&mut self, max_len: usize) {
         for layer in &mut self.layers {
             layer.attention.retain_last(max_len);

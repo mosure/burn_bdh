@@ -36,7 +36,7 @@ use burn_dragon_hatchling::wgpu::init_runtime;
 use burn_dragon_hatchling::{
     BDH, BDHConfig, DatasetConfig, LearningRateScheduleConfig, ModelOverrides, OptimizerConfig,
     ShakespeareBatch, ShakespeareDataset, ShakespeareRandomDataLoader, ShakespeareSplit,
-    TrainingConfig, TrainingHyperparameters, generate_text, language_model_loss,
+    TrainingConfig, TrainingHyperparameters, language_model_loss,
     load_training_config,
 };
 
@@ -249,7 +249,7 @@ where
         valid_loader,
         epochs: total_epochs,
     };
-    let model = match scheduler {
+    let _model = match scheduler {
         ResolvedLrScheduler::Constant(lr) => train_with_scheduler(
             &context,
             model.take().expect("model initialized"),
@@ -288,16 +288,7 @@ where
         )?,
     };
 
-    info!("Training complete on {backend_name}. Generating sample...");
-    let sample_tokenizer = dataset.tokenizer();
-    let sample = generate_text::<B>(
-        &model,
-        sample_tokenizer.as_ref(),
-        &device,
-        &config.training,
-        &config.generation,
-    )?;
-    println!("{sample}");
+    info!("Training complete on {backend_name}");
 
     Ok(())
 }

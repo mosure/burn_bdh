@@ -15,6 +15,14 @@ pub enum ContextStrategy {
     Sliding { window: usize },
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct GenerationSettings {
+    pub max_new_tokens: usize,
+    pub temperature: f32,
+    pub top_k: Option<usize>,
+    pub strategy: ContextStrategy,
+}
+
 pub fn prefill_state<B: Backend>(
     model: &BDH<B>,
     prompt_tokens: &[i64],
@@ -112,19 +120,24 @@ pub fn generate_tokens<B: Backend>(
     model: &BDH<B>,
     prompt_tokens: Vec<i64>,
     device: &B::Device,
-    max_new_tokens: usize,
-    temperature: f32,
-    top_k: Option<usize>,
-    strategy: ContextStrategy,
+    settings: GenerationSettings,
     mut on_token: Option<&mut dyn FnMut(i64)>,
 ) -> Result<Vec<i64>> {
+    let GenerationSettings {
+        max_new_tokens,
+        temperature,
+        top_k,
+        strategy,
+    } = settings;
+
     let mut full_tokens = prompt_tokens;
     let (mut state, mut last_logits) = prefill_state(model, &full_tokens, device)?;
 
-    if let ContextStrategy::Sliding { window } = strategy {
-        if window > 0 && state.position > window {
-            state.trim(window);
-        }
+    if let ContextStrategy::Sliding { window } = strategy
+        && window > 0
+        && state.position > window
+    {
+        state.trim(window);
     }
 
     for _ in 0..max_new_tokens {
@@ -137,10 +150,11 @@ pub fn generate_tokens<B: Backend>(
             callback(next);
         }
 
-        if let ContextStrategy::Sliding { window } = strategy {
-            if window > 0 && state.position > window {
-                state.trim(window);
-            }
+        if let ContextStrategy::Sliding { window } = strategy
+            && window > 0
+            && state.position > window
+        {
+            state.trim(window);
         }
     }
 
@@ -156,27 +170,24 @@ pub fn generate_text<B: Backend>(
 ) -> Result<String> {
     let strategy = resolve_context_strategy(&generation.context_strategy, training.block_size);
     let mut prompt_ids = tokenizer.encode(&generation.prompt, false, false);
-    if let ContextStrategy::Sliding { window } = strategy {
-        if prompt_ids.len() > window {
-            prompt_ids = prompt_ids[prompt_ids.len() - window..].to_vec();
-        }
+    if let ContextStrategy::Sliding { window } = strategy
+        && prompt_ids.len() > window
+    {
+        prompt_ids = prompt_ids[prompt_ids.len() - window..].to_vec();
     }
 
     let prompt_tokens: Vec<i64> = prompt_ids.iter().map(|&id| id as i64).collect();
-    let tokens_all = generate_tokens(
-        model,
-        prompt_tokens,
-        device,
-        generation.max_tokens,
-        generation.temperature,
-        generation.top_k,
+    let settings = GenerationSettings {
+        max_new_tokens: generation.max_tokens,
+        temperature: generation.temperature,
+        top_k: generation.top_k,
         strategy,
-        None,
-    )?;
+    };
+    let tokens_all = generate_tokens(model, prompt_tokens, device, settings, None)?;
 
     let decoded_ids: Vec<u32> = tokens_all
         .iter()
-        .filter_map(|&tok| (tok >= 0).then(|| tok as u32))
+        .filter_map(|&tok| (tok >= 0).then_some(tok as u32))
         .collect();
 
     Ok(tokenizer.decode(&decoded_ids))

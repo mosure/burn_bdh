@@ -24,7 +24,7 @@ num_iters = 3000
 
 [generation]
 prompt = "To be or "
-max_tokens = 128
+max_tokens = 2048
 temperature = 1.0
 top_k = 3
 

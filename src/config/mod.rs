@@ -91,17 +91,12 @@ pub struct GenerationConfig {
     pub context_strategy: ContextStrategyConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContextStrategyConfig {
+    #[default]
     Infinite,
     Sliding { window: usize },
-}
-
-impl Default for ContextStrategyConfig {
-    fn default() -> Self {
-        ContextStrategyConfig::Infinite
-    }
 }
 
 fn default_context_strategy() -> ContextStrategyConfig {

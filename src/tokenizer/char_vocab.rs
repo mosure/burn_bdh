@@ -187,6 +187,10 @@ impl CharVocab {
         self.id2ch.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.id2ch.is_empty()
+    }
+
     pub fn contains(&self, ch: char) -> bool {
         self.ch2id.contains_key(&ch)
     }
@@ -266,6 +270,10 @@ impl super::Tokenizer for CharVocab {
 
     fn len(&self) -> usize {
         Self::len(self)
+    }
+
+    fn is_empty(&self) -> bool {
+        Self::is_empty(self)
     }
 
     fn bos_id(&self) -> Option<u32> {

@@ -16,8 +16,8 @@ pub use dataset::{
     ShakespeareBatch, ShakespeareDataset, ShakespeareRandomDataLoader, ShakespeareSplit,
 };
 pub use generation::{
-    ContextStrategy, generate_text, generate_tokens, prefill_state, resolve_context_strategy,
-    sample_next_token,
+    ContextStrategy, GenerationSettings, generate_text, generate_tokens, prefill_state,
+    resolve_context_strategy, sample_next_token,
 };
 pub use kernel::{BlockPattern1d, BlockPattern2d, BlockSparseConfig};
 pub use model::{BDH, BDHConfig, ModelState, language_model_loss};

@@ -3,7 +3,9 @@
 use std::hint::black_box;
 
 use burn::tensor::backend::Backend as BackendTrait;
-use burn_dragon_hatchling::{BDH, BDHConfig, ContextStrategy, generate_tokens, wgpu::init_runtime};
+use burn_dragon_hatchling::{
+    BDH, BDHConfig, ContextStrategy, GenerationSettings, generate_tokens, wgpu::init_runtime,
+};
 use burn_wgpu::Wgpu;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
@@ -83,21 +85,25 @@ fn run_inference_backend<B, Init, Skip>(
 
         let model = BDH::<B>::new(model_config.clone(), &device);
         let mut prompt_tokens: Vec<i64> = (0..cfg.block).map(|idx| (idx % 255) as i64).collect();
-        if let ContextStrategy::Sliding { window } = BENCH_CONTEXT {
-            if window > 0 && prompt_tokens.len() > window {
-                prompt_tokens = prompt_tokens[prompt_tokens.len() - window..].to_vec();
-            }
+        if let ContextStrategy::Sliding { window } = BENCH_CONTEXT
+            && window > 0
+            && prompt_tokens.len() > window
+        {
+            prompt_tokens = prompt_tokens[prompt_tokens.len() - window..].to_vec();
         }
 
         // Warm-up ensures shader compilation / graph construction is amortized.
+        let settings = GenerationSettings {
+            max_new_tokens: cfg.batch,
+            temperature: 1.0,
+            top_k: None,
+            strategy: BENCH_CONTEXT,
+        };
         generate_tokens(
             &model,
             prompt_tokens.clone(),
             &device,
-            cfg.batch,
-            1.0,
-            None,
-            BENCH_CONTEXT,
+            settings,
             None,
         )
         .expect("warm-up tokens");
@@ -111,10 +117,7 @@ fn run_inference_backend<B, Init, Skip>(
                     &model,
                     prompt_tokens.clone(),
                     &device,
-                    cfg.batch,
-                    1.0,
-                    None,
-                    BENCH_CONTEXT,
+                    settings,
                     None,
                 )
                 .expect("generate tokens");

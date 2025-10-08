@@ -11,8 +11,9 @@ use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
 use burn::tensor::backend::Backend;
 use burn_dragon_hatchling::wgpu::init_runtime;
 use burn_dragon_hatchling::{
-    BDH, BDHConfig, ContextStrategy, ContextStrategyConfig, GenerationConfig, ModelOverrides,
-    TrainingConfig, generate_text, generate_tokens, load_training_config, resolve_context_strategy,
+    BDH, BDHConfig, ContextStrategy, ContextStrategyConfig, GenerationConfig, GenerationSettings,
+    ModelOverrides, TrainingConfig, generate_text, generate_tokens, load_training_config,
+    resolve_context_strategy,
 };
 use burn_wgpu::Wgpu;
 
@@ -117,14 +118,14 @@ where
         eprintln!("{status_msg}");
 
         let mut prompt_ids = tokenizer.encode(&generation.prompt, false, false);
-        if let ContextStrategy::Sliding { window } = strategy {
-            if prompt_ids.len() > window {
-                prompt_ids = prompt_ids[prompt_ids.len() - window..].to_vec();
-            }
+        if let ContextStrategy::Sliding { window } = strategy
+            && prompt_ids.len() > window
+        {
+            prompt_ids = prompt_ids[prompt_ids.len() - window..].to_vec();
         }
 
         let prompt_tokens: Vec<i64> = prompt_ids.iter().map(|&id| id as i64).collect();
-        let prompt_ids_u32: Vec<u32> = prompt_ids.iter().copied().map(|id| id as u32).collect();
+        let prompt_ids_u32: Vec<u32> = prompt_ids.to_vec();
 
         let mut writer = io::stdout();
         let prompt_text = tokenizer.decode(&prompt_ids_u32);
@@ -162,16 +163,13 @@ where
             }
         };
 
-        generate_tokens::<B>(
-            &model,
-            prompt_tokens,
-            &device,
-            generation.max_tokens,
-            generation.temperature,
-            generation.top_k,
+        let settings = GenerationSettings {
+            max_new_tokens: generation.max_tokens,
+            temperature: generation.temperature,
+            top_k: generation.top_k,
             strategy,
-            Some(&mut callback),
-        )?;
+        };
+        generate_tokens::<B>(&model, prompt_tokens, &device, settings, Some(&mut callback))?;
 
         if let Some(err) = stream_err {
             return Err(err);
