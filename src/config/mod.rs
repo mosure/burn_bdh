@@ -427,27 +427,37 @@ mod tests {
             cache_dir = "data"
             train_split_ratio = 0.75
             type = "hugging_face"
-            repo_id = "AI-MO/DeepMath-103K"
+            repo_id = "zwhe99/DeepMath-103K"
             revision = "main"
-            train_files = ["train.jsonl"]
-            validation_files = ["validation.jsonl"]
-            text_fields = ["problem", "solution"]
+            format = "parquet"
+            train_files = [
+                "data/train-00000-of-00010.parquet",
+                "data/train-00001-of-00010.parquet",
+            ]
+            validation_files = []
+            text_fields = ["question", "final_answer"]
             field_separator = "\n\n"
-            template = "{problem}\n{solution}"
+            template = "{question}\n{final_answer}"
             max_records = 1000
         "#;
         let dataset: DatasetConfig = toml::from_str(text).expect("parse dataset config");
         assert_eq!(dataset.train_split_ratio, 0.75);
         match &dataset.source {
             DatasetSourceConfig::HuggingFace(hf) => {
-                assert_eq!(hf.repo_id, "AI-MO/DeepMath-103K");
+                assert_eq!(hf.repo_id, "zwhe99/DeepMath-103K");
                 assert_eq!(hf.revision.as_deref(), Some("main"));
-                assert_eq!(hf.format, HuggingFaceRecordFormat::Jsonl);
-                assert_eq!(hf.train_files, vec!["train.jsonl"]);
-                assert_eq!(hf.validation_files, vec!["validation.jsonl"]);
-                assert_eq!(hf.text_fields, vec!["problem", "solution"]);
+                assert_eq!(hf.format, HuggingFaceRecordFormat::Parquet);
+                assert_eq!(
+                    hf.train_files,
+                    vec![
+                        "data/train-00000-of-00010.parquet".to_string(),
+                        "data/train-00001-of-00010.parquet".to_string()
+                    ]
+                );
+                assert!(hf.validation_files.is_empty());
+                assert_eq!(hf.text_fields, vec!["question", "final_answer"]);
                 assert_eq!(hf.field_separator, "\n\n");
-                assert_eq!(hf.template.as_deref(), Some("{problem}\n{solution}"));
+                assert_eq!(hf.template.as_deref(), Some("{question}\n{final_answer}"));
                 assert_eq!(hf.max_records, Some(1000));
             }
             other => panic!("unexpected dataset source: {other:?}"),

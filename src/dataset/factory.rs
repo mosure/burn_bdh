@@ -113,15 +113,19 @@ fn deepmath_config(
     revision: &Option<String>,
     max_records: Option<usize>,
 ) -> HuggingFaceDatasetConfig {
+    let train_files = (0..10)
+        .map(|idx| format!("data/train-{idx:05}-of-00010.parquet"))
+        .collect();
+
     HuggingFaceDatasetConfig {
-        repo_id: "AI-MO/DeepMath-103K".to_string(),
+        repo_id: "zwhe99/DeepMath-103K".to_string(),
         revision: revision.clone(),
-        format: HuggingFaceRecordFormat::Jsonl,
-        train_files: vec!["train.jsonl".to_string()],
+        format: HuggingFaceRecordFormat::Parquet,
+        train_files,
         validation_files: Vec::new(),
-        text_fields: vec!["problem".to_string(), "solution".to_string()],
+        text_fields: vec!["question".to_string(), "final_answer".to_string()],
         field_separator: "\n\n".to_string(),
-        template: Some("Problem:\n{problem}\n\nSolution:\n{solution}".to_string()),
+        template: Some("Question:\n{question}\n\nAnswer:\n{final_answer}".to_string()),
         max_records,
     }
 }
